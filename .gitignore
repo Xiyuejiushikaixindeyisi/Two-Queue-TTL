@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+*.egg
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.prof
+
+# Data (local trace files, never commit real production traces)
+data/
+!data/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

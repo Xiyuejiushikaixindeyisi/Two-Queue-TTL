@@ -1,0 +1,11 @@
+timestamp,model_id,user_id,request_type,input_length,output_length,hash_ids
+1000.0,qwen-v3,user1,chat,256,50,sys_a|sys_b|usr_1a|usr_1b
+1001.0,qwen-v3,user1,chat,384,80,sys_a|sys_b|usr_1c|usr_1d|usr_1e
+1002.0,qwen-v3,user2,chat,128,30,sys_a|sys_b|usr_2a
+1010.0,qwen-v3,user1,chat,256,50,sys_a|sys_b|usr_1a|usr_1b
+1020.0,qwen-v3,user3,chat,512,100,long_1|long_2|long_3|long_4|long_5|long_6|long_7|long_8
+1030.0,qwen-v3,user1,chat,256,50,sys_a|sys_b|usr_1a|usr_1b
+1031.0,qwen-v3,user2,chat,256,50,sys_a|sys_b|usr_2b|usr_2c
+1040.0,qwen-v3,user1,agent,512,200,sys_a|sys_b|agent_skill_1|agent_skill_2|usr_1f
+1050.0,qwen-v3,user4,chat,128,30,sys_a|usr_4a
+1060.0,qwen-v3,user1,chat,256,50,sys_a|sys_b|usr_1a|usr_1b

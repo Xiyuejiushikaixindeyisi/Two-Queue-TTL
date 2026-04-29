@@ -1,0 +1,61 @@
+{
+  "experiment": "phase1_toy_trace",
+  "description": "Phase 1 three-policy comparison on toy trace (capacity=4, block_size=1)",
+  "trace_path": "tests/fixtures/toy_trace.csv",
+  "results": [
+    {
+      "policy": "lru",
+      "cache_capacity": 4,
+      "block_size": 1,
+      "total_requests": 7,
+      "total_blocks_requested": 19,
+      "total_blocks_hit": 7,
+      "total_blocks_miss": 12,
+      "prefix_block_hit_rate": 0.368421,
+      "saved_prefill_tokens": 7,
+      "eviction_count": 8,
+      "hot_prefix_eviction_count": 0,
+      "evicted_before_next_hit_count": 6,
+      "protected_eviction_count": 0,
+      "probation_eviction_count": 8,
+      "protected_pollution_rate": 0.0,
+      "promotion_count": 0
+    },
+    {
+      "policy": "ttl_lru",
+      "cache_capacity": 4,
+      "block_size": 1,
+      "total_requests": 7,
+      "total_blocks_requested": 19,
+      "total_blocks_hit": 7,
+      "total_blocks_miss": 12,
+      "prefix_block_hit_rate": 0.368421,
+      "saved_prefill_tokens": 7,
+      "eviction_count": 8,
+      "hot_prefix_eviction_count": 0,
+      "evicted_before_next_hit_count": 6,
+      "protected_eviction_count": 0,
+      "probation_eviction_count": 8,
+      "protected_pollution_rate": 0.0,
+      "promotion_count": 0
+    },
+    {
+      "policy": "two_queue_ttl",
+      "cache_capacity": 4,
+      "block_size": 1,
+      "total_requests": 7,
+      "total_blocks_requested": 19,
+      "total_blocks_hit": 7,
+      "total_blocks_miss": 12,
+      "prefix_block_hit_rate": 0.368421,
+      "saved_prefill_tokens": 7,
+      "eviction_count": 8,
+      "hot_prefix_eviction_count": 0,
+      "evicted_before_next_hit_count": 6,
+      "protected_eviction_count": 0,
+      "probation_eviction_count": 8,
+      "protected_pollution_rate": 0.0,
+      "promotion_count": 2
+    }
+  ]
+}

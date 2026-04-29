@@ -1,0 +1,8 @@
+timestamp,model_id,user_id,request_type,input_length,hash_ids,output_length,turn
+1.0,m1,u1,prefill,3,A|B|C,0,0
+2.0,m1,u2,prefill,2,D|E,0,0
+3.0,m1,u1,prefill,3,A|B|C,0,0
+4.0,m1,u1,prefill,4,A|B|C|F,0,0
+9.1,m1,u3,prefill,2,A|B,0,0
+10.0,m1,u2,prefill,2,D|E,0,0
+11.0,m1,u1,prefill,3,A|B|C,0,0

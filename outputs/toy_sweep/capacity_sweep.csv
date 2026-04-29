@@ -1,0 +1,16 @@
+capacity,policy,cache_capacity,block_size,total_requests,total_blocks_requested,total_blocks_hit,total_blocks_miss,prefix_block_hit_rate,saved_prefill_tokens,eviction_count,hot_prefix_eviction_count,evicted_before_next_hit_count,protected_eviction_count,probation_eviction_count,protected_pollution_rate,promotion_count
+2,lru,2,128,7,19,5,14,0.263158,640,11,2,8,0,11,0.0,0
+2,ttl_lru,2,128,7,19,5,14,0.263158,640,11,2,8,0,11,0.0,0
+2,two_queue_ttl,2,128,7,19,5,14,0.263158,640,11,2,8,2,9,0.0,2
+3,lru,3,128,7,19,5,14,0.263158,640,11,2,7,0,11,0.0,0
+3,ttl_lru,3,128,7,19,5,14,0.263158,640,11,2,7,0,11,0.0,0
+3,two_queue_ttl,3,128,7,19,5,14,0.263158,640,10,1,7,1,9,0.0,2
+4,lru,4,128,7,19,7,12,0.368421,896,8,0,6,0,8,0.0,0
+4,ttl_lru,4,128,7,19,7,12,0.368421,896,8,0,6,0,8,0.0,0
+4,two_queue_ttl,4,128,7,19,7,12,0.368421,896,8,0,6,0,8,0.0,2
+6,lru,6,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,0
+6,ttl_lru,6,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,0
+6,two_queue_ttl,6,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,3
+8,lru,8,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,0
+8,ttl_lru,8,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,0
+8,two_queue_ttl,8,128,7,19,13,6,0.684211,1664,0,0,0,0,0,0.0,3
