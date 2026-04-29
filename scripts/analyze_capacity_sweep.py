@@ -29,10 +29,12 @@ import csv
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sim.config import SimConfig, TTLLRUConfig, TwoQueueTTLConfig
+from sim.core.future_index import build_future_index
 from sim.io.raw_trace_loader import load_raw_trace
 from sim.io.trace_loader import load_trace, precompute_prefix_keys
 from sim.metrics.collector import MetricsSnapshot, compute_gap_closed_ratios
@@ -104,6 +106,13 @@ def run_sweep(
     total = len(capacities) * policy_count
     done = 0
 
+    # Build future index once — shared across all capacities and all policies.
+    print("  Building future access index …", flush=True)
+    t0 = time.time()
+    future_index = build_future_index(trace)
+    print(f"  Future index ready ({time.time() - t0:.1f}s, "
+          f"{len(future_index):,} unique block keys)\n", flush=True)
+
     for cap in sorted(capacities):
         configs = []
         if include_infinite:
@@ -119,19 +128,30 @@ def run_sweep(
             configs.append(SimConfig(cache_capacity=cap, block_size=block_size,
                                      policy="belady"))
 
-        snapshots = SimulationRunner.compare(trace, configs)
-
-        # Compute gap_closed_ratio using infinite_cache and lru from this capacity
-        compute_gap_closed_ratios(snapshots)
-
-        for s in snapshots:
+        # Run each policy individually so progress is printed before each run starts.
+        cap_snapshots = []
+        for cfg in configs:
             done += 1
+            print(f"  [{done}/{total}] capacity={cap:>8}  policy={cfg.policy:<16}  running …",
+                  end="", flush=True)
+            t_run = time.time()
+            runner = SimulationRunner(cfg)
+            snap = runner.run(trace, future_index=future_index)
+            elapsed = time.time() - t_run
+            gcr_str = ""
+            print(f"  hit_rate={snap.prefix_block_hit_rate:.4f}  ({elapsed:.1f}s)", flush=True)
+            cap_snapshots.append(snap)
+
+        # Compute gap_closed_ratio once all policies for this capacity are done.
+        compute_gap_closed_ratios(cap_snapshots)
+        for s in cap_snapshots:
             gcr = f"  gap={s.gap_closed_ratio:.3f}" if s.gap_closed_ratio is not None else ""
-            print(f"  [{done}/{total}] capacity={cap:>8}  policy={s.policy_name:<16}"
-                  f"  hit_rate={s.prefix_block_hit_rate:.4f}{gcr}", flush=True)
+            print(f"    └─ {s.policy_name:<16}{gcr}", flush=True)
             row = {"capacity": cap}
             row.update(s.to_dict())
             results.append(row)
+        print(flush=True)
+
     return results
 
 
