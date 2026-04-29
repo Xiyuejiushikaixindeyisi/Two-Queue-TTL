@@ -162,7 +162,7 @@ def print_summary_table(results: list[dict]) -> None:
     policies_in_results = {r["policy"] for r in results}
     policies = [p for p in all_policies if p in policies_in_results]
     cap_set = sorted({r["capacity"] for r in results})
-    col = 12
+    col = max(14, max((len(p) for p in policies), default=0) + 2)
 
     col_w = 14 + col * len(policies)
     print("\n" + "=" * col_w)

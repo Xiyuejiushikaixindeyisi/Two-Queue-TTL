@@ -7,14 +7,20 @@ Design references
 
 Queue layout (FREE_CACHED pool only)
 -------------------------------------
-  Probation  — first-time / unverified blocks; bears main eviction pressure
+  Probation  — first-time / unverified blocks
   Protected  — hit_count ≥ promotion_threshold or registry match; TTL-protected
 
 Eviction priority order
 ------------------------
-  1. Probation: LRU head (oldest)
-  2. Protected: TTL-expired blocks, LRU order
+  1. Protected: TTL-expired blocks, LRU order  (stale protected cleared first)
+  2. Probation: LRU head (oldest)
   3. Protected: non-expired blocks, LRU order (last resort)
+
+Rationale for Priority 1 = expired Protected:
+  Probation blocks may be new session content about to be reused.
+  TTL-expired Protected blocks are stale (session ended > base_ttl ago).
+  Evicting stale Protected before Probation prevents Protected from bloating
+  with dead sessions while valuable new session blocks are forced out.
 
 TTL anchors (locked to F13 reuse_time data)
 --------------------------------------------
@@ -46,8 +52,9 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
         Minimum hit_count for Probation → Protected promotion.
     protected_ratio:
         Fraction of total capacity reserved for Protected blocks.
-        Protected queue enforces this as a soft cap; excess blocks are
-        demoted to Probation (future: Phase 2).
+        When Protected grows beyond this cap, the LRU Protected block is
+        demoted to Probation.  This keeps probation large enough to absorb
+        cache-pollution bursts without evicting Protected blocks.
     registry:
         Optional offline registry.  Matching blocks bypass Probation
         and enter Protected immediately on first insertion.
@@ -147,6 +154,7 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
             self._refresh_ttl(meta, timestamp)
             self._protected[block_key] = meta
             self._protected.move_to_end(block_key)
+            self._maybe_demote_overflow()
         else:
             meta.queue = BlockQueue.PROBATION
             self._probation[block_key] = meta
@@ -157,17 +165,17 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
         timestamp: float,
         pinned: Optional[Set[str]] = None,
     ) -> Optional[BlockMeta]:
-        # Priority 1: Probation LRU head
-        evicted = self._evict_from(self._probation, timestamp, pinned)
-        if evicted is not None:
-            return evicted
-
-        # Priority 2: Protected — TTL-expired, LRU order
+        # Priority 1: Protected — TTL-expired, LRU order (stale blocks first)
         evicted = self._evict_expired_from(self._protected, timestamp, pinned)
         if evicted is not None:
             return evicted
 
-        # Priority 3: Protected — any block, LRU order (last resort)
+        # Priority 2: Probation LRU head
+        evicted = self._evict_from(self._probation, timestamp, pinned)
+        if evicted is not None:
+            return evicted
+
+        # Priority 3: Protected — non-expired blocks, LRU order (last resort)
         evicted = self._evict_from(self._protected, timestamp, pinned)
         return evicted
 
@@ -195,6 +203,21 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
         self._protected[block_key] = meta
         self._protected.move_to_end(block_key)
         self._pending_promotions.append(block_key)
+        self._maybe_demote_overflow()
+
+    def _maybe_demote_overflow(self) -> None:
+        """Demote LRU Protected block to Probation when Protected exceeds its cap.
+
+        Enforcing the cap keeps probation large enough to absorb pollution bursts
+        without having to evict non-expired Protected blocks.
+        """
+        while len(self._protected) > self._protected_capacity:
+            block_key, meta = next(iter(self._protected.items()))
+            del self._protected[block_key]
+            meta.queue = BlockQueue.PROBATION
+            self._probation[block_key] = meta
+            self._probation.move_to_end(block_key)
+            self._pending_demotions.append(block_key)
 
     @staticmethod
     def _evict_from(

@@ -160,15 +160,20 @@ class TestEvictionQueueOrder:
         assert "h1" in p._probation
         assert "h1" not in p._protected
 
-    def test_probation_evicted_before_expired_protected(self):
-        """Probation block is evicted before a TTL-expired Protected block."""
+    def test_expired_protected_evicted_before_probation(self):
+        """TTL-expired Protected block is evicted before a Probation block.
+
+        Rationale: a Protected block with expired TTL is stale (session ended
+        > base_ttl ago).  A Probation block may be new session content about to
+        be reused.  Stale Protected blocks should clear first.
+        """
         reg = OfflineRegistry(protected={"p1"})
         p = make_policy(capacity=4, base_ttl=5.0, registry=reg)
         p.add("p1", "", 0.0, 0, "u1")   # enters Protected immediately; ttl_expiry=5
         p.add("q1", "", 1.0, 0, "u1")   # enters Probation
         # At t=10: p1.ttl=5 expired, q1 is in Probation
         evicted = p.evict_one(10.0)
-        assert evicted.block_key == "q1"   # Probation always before Protected
+        assert evicted.block_key == "p1"   # expired Protected evicted before Probation
 
     def test_protected_expired_evicted_before_valid_protected(self):
         """Among Protected blocks only, expired one is evicted before valid one."""

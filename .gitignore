@@ -1,4 +1,4 @@
-# Python
+# ── Python build artifacts ──────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -7,25 +7,72 @@ __pycache__/
 dist/
 build/
 .eggs/
+*.egg
+.installed.cfg
+lib/
+lib64/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
 .venv/
 venv/
-*.egg
+env/
+ENV/
 
-# Test & coverage
+# ── Test & coverage ──────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 *.prof
+*.prof.svg
 
-# Data (local trace files, never commit real production traces)
-data/
+# ── Type / lint caches ───────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ── Simulation outputs (generated, never commit) ─────────────────────────────
+outputs/
+results/
+artifacts/
+
+# ── Trace data (may contain production / private data) ───────────────────────
+# Keep data/.gitkeep so the directory is tracked.
+data/**
 !data/.gitkeep
+!data/README.md
 
-# IDE
+# Explicit trace file extensions (belt-and-suspenders)
+*.csv
+*.jsonl
+*.parquet
+*.arrow
+*.tsv
+# Exception: small fixture files committed to tests/
+!tests/fixtures/*.csv
+!tests/fixtures/*.jsonl
+
+# ── Offline registry output ───────────────────────────────────────────────────
+*.txt
+# Exception: keep committed docs / requirements
+!requirements*.txt
+!*.rst
+!docs/*.txt
+
+# ── Environment / secrets ────────────────────────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# OS
+# ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

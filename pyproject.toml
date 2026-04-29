@@ -17,6 +17,10 @@ dev = [
 io = [
     "pandas>=1.5",
 ]
+plot = [
+    "matplotlib>=3.5",
+    "numpy>=1.22",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
