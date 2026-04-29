@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import time
 from typing import List
 
 from ..core.prefix_key import make_prefix_path_keys
@@ -30,9 +31,9 @@ def load_trace(path: str) -> List[TraceRecord]:
     Supports .csv and .jsonl/.ndjson.
     Returns records sorted ascending by timestamp.
 
-    Precomputes prefix_path_keys (SHA-256 chain) for every record so that
-    simulation runs and future-index builds can reuse the result without
-    recomputing millions of hash operations per run.
+    Note: prefix_path_keys (SHA-256 chain) are NOT precomputed here.
+    Call precompute_prefix_keys(records) before running simulations to avoid
+    recomputing millions of SHA-256 operations per simulation run.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
@@ -43,9 +44,39 @@ def load_trace(path: str) -> List[TraceRecord]:
         raise ValueError(f"Unsupported trace format: {ext!r}. Use .csv or .jsonl")
 
     records.sort(key=lambda r: r.timestamp)
-    for record in records:
-        record.prefix_path_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
     return records
+
+
+def precompute_prefix_keys(records: List[TraceRecord], report_every: int = 1000) -> None:
+    """Precompute and cache SHA-256 prefix-path keys for every record in-place.
+
+    This is a one-time O(total_block_refs) computation.  Call it once after
+    load_trace() and before the first SimulationRunner.compare() call.
+    All subsequent simulation runs reuse the cached keys with zero SHA-256 cost.
+
+    Parameters
+    ----------
+    records:
+        Loaded trace records (mutated in place: prefix_path_keys is set).
+    report_every:
+        Print progress every N records.  Set to 0 to suppress output.
+    """
+    n = len(records)
+    if n == 0:
+        return
+    total_blocks = sum(len(r.hash_ids) for r in records)
+    print(
+        f"  Precomputing prefix-path keys: {n:,} records, "
+        f"{total_blocks:,} total blocks …",
+        flush=True,
+    )
+    t0 = time.time()
+    for i, record in enumerate(records, 1):
+        record.prefix_path_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
+        if report_every and i % report_every == 0:
+            print(f"    {i:,}/{n:,} records done …", flush=True)
+    elapsed = time.time() - t0
+    print(f"  Prefix keys ready  ({elapsed:.1f}s)", flush=True)
 
 
 def _load_csv(path: str) -> List[TraceRecord]:

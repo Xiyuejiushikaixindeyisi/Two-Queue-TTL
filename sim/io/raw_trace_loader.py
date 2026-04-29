@@ -86,8 +86,6 @@ def load_raw_trace(
         print(f"  done: {len(records):,} records loaded")
 
     records.sort(key=lambda r: r.timestamp)
-    for record in records:
-        record.prefix_path_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
     return records
 
 

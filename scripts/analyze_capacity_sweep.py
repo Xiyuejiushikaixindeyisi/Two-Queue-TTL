@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sim.config import SimConfig, TTLLRUConfig, TwoQueueTTLConfig
 from sim.io.raw_trace_loader import load_raw_trace
-from sim.io.trace_loader import load_trace
+from sim.io.trace_loader import load_trace, precompute_prefix_keys
 from sim.metrics.collector import MetricsSnapshot, compute_gap_closed_ratios
 from sim.runner import SimulationRunner
 
@@ -359,6 +359,8 @@ def main() -> None:
         trace = load_trace(args.trace)
     print(f"  {len(trace):,} records loaded")
     print_trace_stats(trace)
+
+    precompute_prefix_keys(trace)
 
     print(f"Running capacity sweep: {args.capacities}")
     results = run_sweep(
