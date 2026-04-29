@@ -8,6 +8,8 @@ Key semantic contract (D1/D2 in round2_plan.md):
       then:  non-expired blocks (LRU order, fallback)
   - ttl_expiry is refreshed on every hit (including when already expired).
 """
+import heapq
+
 import pytest
 
 from sim.policies.ttl_lru import TTLLRUPolicy
@@ -114,9 +116,10 @@ class TestEvictionPriority:
         p3.add("B", "c2", 1.0, 0, "u1")   # B: LRU pos 1, ttl=101
         p3.add("C", "c3", 2.0, 0, "u1")   # C: LRU pos 2, ttl=102
         # Force C to expire earliest — direct mutation of internal state.
-        # Must also sync _min_expiry so the fast-path guard sees the new value.
+        # Must also push a fresh heap entry so evict_one() can find it.
         p3._cache["C"].ttl_expiry = 5.0
         p3._min_expiry = min(p3._min_expiry, 5.0)
+        heapq.heappush(p3._expiry_heap, (5.0, "C"))
         # LRU order: [A(0), B(1), C(2)] — LRU would evict A
         # TTL expiry order: C(5) < A(100) < B(101) — TTL-LRU evicts C
         evicted = p3.evict_one(10.0)

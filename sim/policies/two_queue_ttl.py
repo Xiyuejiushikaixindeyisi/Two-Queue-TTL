@@ -29,6 +29,7 @@ TTL anchors (locked to F13 reuse_time data)
 """
 from __future__ import annotations
 
+import heapq
 from collections import OrderedDict
 from typing import List, Optional, Set
 
@@ -78,6 +79,11 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
 
         self._probation: OrderedDict[str, BlockMeta] = OrderedDict()
         self._protected: OrderedDict[str, BlockMeta] = OrderedDict()
+
+        # Min-heap of (ttl_expiry, block_key) for the Protected queue only.
+        # Lazy deletion: skip stale entries where key not in _protected or
+        # _protected[key].ttl_expiry != heap_exp (TTL was refreshed).
+        self._protected_heap: list = []
 
         # Event buffer flushed by flush_events()
         self._pending_promotions: List[str] = []
@@ -154,6 +160,7 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
             self._refresh_ttl(meta, timestamp)
             self._protected[block_key] = meta
             self._protected.move_to_end(block_key)
+            heapq.heappush(self._protected_heap, (meta.ttl_expiry, block_key))
             self._maybe_demote_overflow()
         else:
             meta.queue = BlockQueue.PROBATION
@@ -165,8 +172,8 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
         timestamp: float,
         pinned: Optional[Set[str]] = None,
     ) -> Optional[BlockMeta]:
-        # Priority 1: Protected — TTL-expired, LRU order (stale blocks first)
-        evicted = self._evict_expired_from(self._protected, timestamp, pinned)
+        # Priority 1: Protected — TTL-expired, heap order (stale blocks first)
+        evicted = self._evict_expired_protected_heap(timestamp, pinned)
         if evicted is not None:
             return evicted
 
@@ -195,6 +202,9 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
     def _refresh_ttl(self, meta: BlockMeta, timestamp: float) -> None:
         ttl = self._extended_ttl if meta.hit_count >= 5 else self._base_ttl
         meta.ttl_expiry = timestamp + ttl
+        # Push a fresh heap entry; the old one becomes stale and will be
+        # skipped on pop (because cache[key].ttl_expiry != old_exp).
+        heapq.heappush(self._protected_heap, (meta.ttl_expiry, meta.block_key))
 
     def _promote(self, block_key: str, meta: BlockMeta, timestamp: float) -> None:
         del self._probation[block_key]
@@ -219,6 +229,42 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
             self._probation.move_to_end(block_key)
             self._pending_demotions.append(block_key)
 
+    def _evict_expired_protected_heap(
+        self,
+        timestamp: float,
+        pinned: Optional[Set[str]],
+    ) -> Optional[BlockMeta]:
+        """Evict the earliest-expiring expired block from Protected via the heap."""
+        skipped_pinned: list = []
+        result: Optional[BlockMeta] = None
+
+        while self._protected_heap:
+            exp, key = self._protected_heap[0]
+            # Stale: block left Protected (evicted or demoted).
+            if key not in self._protected:
+                heapq.heappop(self._protected_heap)
+                continue
+            # Stale: TTL was refreshed after this entry was pushed.
+            if self._protected[key].ttl_expiry != exp:
+                heapq.heappop(self._protected_heap)
+                continue
+            # Not expired yet — no expired blocks remain.
+            if exp > timestamp:
+                break
+            heapq.heappop(self._protected_heap)
+            if pinned and key in pinned:
+                skipped_pinned.append((exp, key))
+                continue
+            result = self._protected[key]
+            del self._protected[key]
+            break
+
+        # Re-push pinned-but-expired entries so they remain evictable later.
+        for item in skipped_pinned:
+            heapq.heappush(self._protected_heap, item)
+
+        return result
+
     @staticmethod
     def _evict_from(
         queue: OrderedDict[str, BlockMeta],
@@ -230,18 +276,4 @@ class TwoQueueTTLPolicy(AbstractCachePolicy):
                 continue
             del queue[block_key]
             return meta
-        return None
-
-    @staticmethod
-    def _evict_expired_from(
-        queue: OrderedDict[str, BlockMeta],
-        timestamp: float,
-        pinned: Optional[Set[str]],
-    ) -> Optional[BlockMeta]:
-        for block_key, meta in queue.items():
-            if pinned and block_key in pinned:
-                continue
-            if meta.is_ttl_expired(timestamp):
-                del queue[block_key]
-                return meta
         return None

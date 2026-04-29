@@ -7,6 +7,7 @@ Strategy ID S3 in experiment plan section 5.2.
 """
 from __future__ import annotations
 
+import heapq
 from collections import OrderedDict
 from typing import Optional, Set
 
@@ -31,9 +32,13 @@ class TTLLRUPolicy(AbstractCachePolicy):
         super().__init__(capacity)
         self._ttl = ttl
         self._cache: OrderedDict[str, BlockMeta] = OrderedDict()
-        # Lower-bound on the minimum ttl_expiry across all cached blocks.
-        # If _min_expiry > timestamp, no block is expired — skip the O(n) scan.
-        # Never updated on eviction (stays as a safe lower bound even when stale).
+        # Min-heap of (ttl_expiry, block_key).  Lazy: entries may be stale
+        # (block evicted or TTL refreshed).  Validated on pop via:
+        #   key not in _cache  → evicted, skip
+        #   cache[key].ttl_expiry != heap_exp  → refreshed, skip
+        self._expiry_heap: list = []
+        # Legacy lower-bound kept for the unit-test that directly mutates
+        # ttl_expiry and syncs _min_expiry.  Not used by evict_one() anymore.
         self._min_expiry: float = float("inf")
 
     @property
@@ -57,6 +62,8 @@ class TTLLRUPolicy(AbstractCachePolicy):
         meta.hit_count += 1
         meta.users_seen.add(user_id)
         meta.ttl_expiry = timestamp + self._ttl   # refresh on every hit
+        # Push a fresh entry; the old one becomes stale and will be skipped on pop.
+        heapq.heappush(self._expiry_heap, (meta.ttl_expiry, block_key))
         self._cache.move_to_end(block_key)
         return True
 
@@ -79,6 +86,7 @@ class TTLLRUPolicy(AbstractCachePolicy):
         meta.users_seen.add(user_id)
         self._cache[block_key] = meta
         self._cache.move_to_end(block_key)
+        heapq.heappush(self._expiry_heap, (meta.ttl_expiry, block_key))
         if meta.ttl_expiry < self._min_expiry:
             self._min_expiry = meta.ttl_expiry
 
@@ -87,18 +95,40 @@ class TTLLRUPolicy(AbstractCachePolicy):
         timestamp: float,
         pinned: Optional[Set[str]] = None,
     ) -> Optional[BlockMeta]:
-        # Fast path: skip the O(n) expired scan when _min_expiry proves no block
-        # has expired yet.  _min_expiry is a safe lower bound: it may be stale
-        # (too low) after evictions but can never be higher than the true minimum,
-        # so "timestamp < _min_expiry" reliably means zero expired blocks.
-        if self._min_expiry <= timestamp:
-            for block_key, meta in self._cache.items():
-                if pinned and block_key in pinned:
-                    continue
-                if meta.is_ttl_expired(timestamp):
-                    del self._cache[block_key]
-                    return meta
+        # Phase 1: pop expired entries from the heap (O(log n) per pop).
+        # Lazy deletion: skip stale entries (evicted or TTL-refreshed blocks).
+        skipped_pinned: list = []
+        result: Optional[BlockMeta] = None
 
+        while self._expiry_heap:
+            exp, key = self._expiry_heap[0]
+            # Stale: block was evicted already.
+            if key not in self._cache:
+                heapq.heappop(self._expiry_heap)
+                continue
+            # Stale: TTL was refreshed after this heap entry was pushed.
+            if self._cache[key].ttl_expiry != exp:
+                heapq.heappop(self._expiry_heap)
+                continue
+            # Not expired yet — no expired blocks remain.
+            if exp > timestamp:
+                break
+            heapq.heappop(self._expiry_heap)
+            if pinned and key in pinned:
+                skipped_pinned.append((exp, key))
+                continue
+            result = self._cache[key]
+            del self._cache[key]
+            break
+
+        # Re-push pinned-but-expired entries so they remain evictable later.
+        for item in skipped_pinned:
+            heapq.heappush(self._expiry_heap, item)
+
+        if result is not None:
+            return result
+
+        # Phase 2: LRU fallback — no expired non-pinned block found.
         for block_key, meta in self._cache.items():
             if pinned and block_key in pinned:
                 continue
