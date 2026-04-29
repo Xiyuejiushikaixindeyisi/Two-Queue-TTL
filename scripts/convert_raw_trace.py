@@ -71,13 +71,27 @@ def main() -> None:
     out_fields = ["timestamp", "model_id", "user_id", "request_type",
                   "input_length", "hash_ids"]
 
+    # Column name aliases: maps alternative names → canonical names used below.
+    # Add entries here if the source CSV uses different column names.
+    _COL_ALIASES = {
+        "请求ID":   "request_id",
+        "租户ID":   "user_id",
+        "请求参数": "raw_prompt",
+    }
+
     with open(args.input, newline="", encoding="utf-8") as fin:
         reader = csv.DictReader(fin)
-        rows = list(reader)
+        raw_rows = list(reader)
 
-    if not rows:
+    if not raw_rows:
         print("Input file is empty.")
         return
+
+    # Normalise column names using alias table.
+    def _normalise(row: dict) -> dict:
+        return {_COL_ALIASES.get(k, k): v for k, v in row.items()}
+
+    rows = [_normalise(r) for r in raw_rows]
 
     converted = []
     for i, row in enumerate(rows, 1):
