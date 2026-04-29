@@ -34,6 +34,7 @@ we prefer stdlib correctness over speed optimisation.
 from __future__ import annotations
 
 import hashlib
+import os
 import struct
 from typing import List
 
@@ -43,13 +44,19 @@ from typing import List
 # ---------------------------------------------------------------------------
 
 def _try_tiktoken():
+    # Honour explicit opt-out (useful in air-gapped / no-network environments
+    # where tiktoken would fail trying to download the BPE model file).
+    if os.environ.get("DISABLE_TIKTOKEN"):
+        return None, None
     try:
         import tiktoken
         enc = tiktoken.get_encoding("cl100k_base")
         def tokenize(text: str) -> List[int]:
             return enc.encode(text)
         return tokenize, "tiktoken:cl100k_base"
-    except ImportError:
+    except Exception:
+        # Covers ImportError (not installed) and any network/SSL errors that
+        # tiktoken raises when it cannot download the BPE model file.
         return None, None
 
 
