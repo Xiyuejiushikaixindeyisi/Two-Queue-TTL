@@ -94,10 +94,11 @@ class PrefixCache:
         miss_blocks: List[str] = []
         evicted: List[BlockMeta] = []
 
-        # Compute chained prefix-path keys (mirrors vLLM's hash_block_tokens chain).
-        # Using raw hash_ids[i] as keys is incorrect: two requests that share the
-        # same block content at position i but differ earlier would collide.
-        prefix_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
+        # Use precomputed keys if available (populated by load_trace for performance).
+        # Falls back to on-the-fly computation for records constructed in tests.
+        prefix_keys = (record.prefix_path_keys
+                       if record.prefix_path_keys
+                       else make_prefix_path_keys(record.model_id, record.hash_ids))
 
         # ---- Phase 1: find longest prefix hit ----
         for pos, key in enumerate(prefix_keys):

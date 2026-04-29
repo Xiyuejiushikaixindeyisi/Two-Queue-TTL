@@ -32,7 +32,7 @@ from typing import List, Optional
 
 from .cache.prefix_cache import PrefixCache
 from .config import SimConfig, TTLLRUConfig
-from .core.future_index import FutureIndex, build_future_index
+from .core.future_index import FutureIndex, build_future_index  # noqa: F401 (FutureIndex used in type hint)
 from .core.trace import TraceRecord
 from .io.registry import OfflineRegistry
 from .metrics.collector import MetricsCollector, MetricsSnapshot
@@ -63,10 +63,21 @@ class SimulationRunner:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, trace: List[TraceRecord]) -> MetricsSnapshot:
-        """Replay the trace and return the collected metrics snapshot."""
-        # Build future index once; shared by Belady policy and MetricsCollector.
-        future_index = build_future_index(trace)
+    def run(
+        self,
+        trace: List[TraceRecord],
+        future_index: Optional[FutureIndex] = None,
+    ) -> MetricsSnapshot:
+        """Replay the trace and return the collected metrics snapshot.
+
+        Parameters
+        ----------
+        future_index:
+            Pre-built future access index.  When compare() is used, pass the
+            shared index to avoid rebuilding it once per policy.
+        """
+        if future_index is None:
+            future_index = build_future_index(trace)
 
         policy = self._build_policy(future_index)
         cache = PrefixCache(policy, block_size=self._config.block_size)
@@ -90,8 +101,14 @@ class SimulationRunner:
         configs: List[SimConfig],
         registry: Optional[OfflineRegistry] = None,
     ) -> List[MetricsSnapshot]:
-        """Run multiple policies against the same trace and return all snapshots."""
-        return [cls(cfg, registry=registry).run(trace) for cfg in configs]
+        """Run multiple policies against the same trace and return all snapshots.
+
+        Builds the future index once and shares it across all policy runs to
+        avoid O(policies) redundant SHA-256 chain recomputations.
+        """
+        shared_index = build_future_index(trace)
+        return [cls(cfg, registry=registry).run(trace, future_index=shared_index)
+                for cfg in configs]
 
     # ------------------------------------------------------------------
     # Internal helpers

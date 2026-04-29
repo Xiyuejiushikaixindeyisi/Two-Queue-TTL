@@ -27,6 +27,7 @@ from __future__ import annotations
 import csv
 from typing import List, Optional
 
+from ..core.prefix_key import make_prefix_path_keys
 from ..core.trace import TraceRecord
 from .prompt_tokenizer import compute_hash_ids, token_count, tokenizer_backend
 
@@ -85,6 +86,8 @@ def load_raw_trace(
         print(f"  done: {len(records):,} records loaded")
 
     records.sort(key=lambda r: r.timestamp)
+    for record in records:
+        record.prefix_path_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
     return records
 
 

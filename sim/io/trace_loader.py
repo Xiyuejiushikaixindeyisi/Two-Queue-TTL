@@ -20,6 +20,7 @@ import json
 import os
 from typing import List
 
+from ..core.prefix_key import make_prefix_path_keys
 from ..core.trace import TraceRecord
 
 
@@ -28,6 +29,10 @@ def load_trace(path: str) -> List[TraceRecord]:
 
     Supports .csv and .jsonl/.ndjson.
     Returns records sorted ascending by timestamp.
+
+    Precomputes prefix_path_keys (SHA-256 chain) for every record so that
+    simulation runs and future-index builds can reuse the result without
+    recomputing millions of hash operations per run.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
@@ -38,6 +43,8 @@ def load_trace(path: str) -> List[TraceRecord]:
         raise ValueError(f"Unsupported trace format: {ext!r}. Use .csv or .jsonl")
 
     records.sort(key=lambda r: r.timestamp)
+    for record in records:
+        record.prefix_path_keys = make_prefix_path_keys(record.model_id, record.hash_ids)
     return records
 
 

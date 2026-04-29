@@ -19,10 +19,14 @@ FutureIndex = Dict[str, List[float]]
 
 
 def build_future_index(trace: List[TraceRecord]) -> FutureIndex:
-    """Return block_key_hex → sorted access timestamps for the whole trace."""
+    """Return block_key_hex → sorted access timestamps for the whole trace.
+
+    Uses TraceRecord.prefix_path_keys if precomputed (populated by load_trace)
+    to avoid redundant SHA-256 chain computations across simulation runs.
+    """
     index: Dict[str, List[float]] = defaultdict(list)
     for record in trace:
-        keys = make_prefix_path_keys(record.model_id, record.hash_ids)
+        keys = record.prefix_path_keys or make_prefix_path_keys(record.model_id, record.hash_ids)
         for key in keys:
             index[key.hex()].append(record.timestamp)
     return {k: sorted(v) for k, v in index.items()}

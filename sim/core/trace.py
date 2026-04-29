@@ -28,6 +28,11 @@ class TraceRecord:
         Output token count.  Not used by Phase-1 simulation; kept for completeness.
     turn:
         Conversation turn index within a session.  Optional.
+    prefix_path_keys:
+        Precomputed chained SHA-256 keys for each block (mirrors vLLM's
+        hash_block_tokens chain).  Populated by load_trace() after construction
+        to avoid recomputing 11M+ SHA-256 operations per simulation run.
+        Not stored in CSV/JSONL; excluded from repr and equality checks.
     """
 
     timestamp: float
@@ -38,3 +43,6 @@ class TraceRecord:
     hash_ids: List[str]
     output_length: int = 0
     turn: int = 0
+    prefix_path_keys: List[bytes] = field(
+        default_factory=list, repr=False, compare=False
+    )
