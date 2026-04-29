@@ -113,7 +113,10 @@ class TestEvictionPriority:
         p3.add("A", "c1", 0.0, 0, "u1")   # A: LRU pos 0, ttl=100
         p3.add("B", "c2", 1.0, 0, "u1")   # B: LRU pos 1, ttl=101
         p3.add("C", "c3", 2.0, 0, "u1")   # C: LRU pos 2, ttl=102
-        p3._cache["C"].ttl_expiry = 5.0    # C's TTL expires earliest
+        # Force C to expire earliest — direct mutation of internal state.
+        # Must also sync _min_expiry so the fast-path guard sees the new value.
+        p3._cache["C"].ttl_expiry = 5.0
+        p3._min_expiry = min(p3._min_expiry, 5.0)
         # LRU order: [A(0), B(1), C(2)] — LRU would evict A
         # TTL expiry order: C(5) < A(100) < B(101) — TTL-LRU evicts C
         evicted = p3.evict_one(10.0)

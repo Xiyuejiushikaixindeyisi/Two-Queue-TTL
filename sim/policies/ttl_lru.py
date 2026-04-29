@@ -31,6 +31,10 @@ class TTLLRUPolicy(AbstractCachePolicy):
         super().__init__(capacity)
         self._ttl = ttl
         self._cache: OrderedDict[str, BlockMeta] = OrderedDict()
+        # Lower-bound on the minimum ttl_expiry across all cached blocks.
+        # If _min_expiry > timestamp, no block is expired — skip the O(n) scan.
+        # Never updated on eviction (stays as a safe lower bound even when stale).
+        self._min_expiry: float = float("inf")
 
     @property
     def size(self) -> int:
@@ -75,19 +79,25 @@ class TTLLRUPolicy(AbstractCachePolicy):
         meta.users_seen.add(user_id)
         self._cache[block_key] = meta
         self._cache.move_to_end(block_key)
+        if meta.ttl_expiry < self._min_expiry:
+            self._min_expiry = meta.ttl_expiry
 
     def evict_one(
         self,
         timestamp: float,
         pinned: Optional[Set[str]] = None,
     ) -> Optional[BlockMeta]:
-        # Prefer TTL-expired blocks first, then LRU head
-        for block_key, meta in self._cache.items():
-            if pinned and block_key in pinned:
-                continue
-            if meta.is_ttl_expired(timestamp):
-                del self._cache[block_key]
-                return meta
+        # Fast path: skip the O(n) expired scan when _min_expiry proves no block
+        # has expired yet.  _min_expiry is a safe lower bound: it may be stale
+        # (too low) after evictions but can never be higher than the true minimum,
+        # so "timestamp < _min_expiry" reliably means zero expired blocks.
+        if self._min_expiry <= timestamp:
+            for block_key, meta in self._cache.items():
+                if pinned and block_key in pinned:
+                    continue
+                if meta.is_ttl_expired(timestamp):
+                    del self._cache[block_key]
+                    return meta
 
         for block_key, meta in self._cache.items():
             if pinned and block_key in pinned:
