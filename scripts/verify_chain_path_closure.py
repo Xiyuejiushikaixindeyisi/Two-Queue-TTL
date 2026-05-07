@@ -174,9 +174,14 @@ def decode_chain_content(
     for csv_path in csv_files:
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            mapping = _canon_fieldnames(reader.fieldnames or [])
+            rid_col = mapping.get("request_id")
+            prompt_col = mapping.get("raw_prompt")
+            if not rid_col or not prompt_col:
+                continue
             for row in reader:
-                if row.get("request_id") == target_request_id:
-                    blocks = split_blocks(row["raw_prompt"], block_size)
+                if row.get(rid_col) == target_request_id:
+                    blocks = split_blocks(row[prompt_col], block_size)
                     return [
                         b.decode("utf-8", errors="replace")
                         for b in blocks[:chain_length]
@@ -194,23 +199,52 @@ def discover_csv_files(path: Path) -> list[Path]:
     return [path]
 
 
+# Column aliases for backward-compat with Chinese-named production CSVs.
+COLUMN_ALIASES = {
+    "请求ID":   "request_id",
+    "租户ID":   "user_id",
+    "请求参数": "raw_prompt",
+}
+
+
+def _canon_fieldnames(fieldnames: list[str]) -> dict[str, str]:
+    """Return {canonical_name: actual_csv_column_name}.
+
+    Prefers exact English name; falls back to Chinese alias if present.
+    """
+    actual = set(fieldnames or [])
+    mapping: dict[str, str] = {}
+    for canonical in ("request_id", "user_id", "raw_prompt", "timestamp"):
+        if canonical in actual:
+            mapping[canonical] = canonical
+            continue
+        # try aliases
+        for alias, target in COLUMN_ALIASES.items():
+            if target == canonical and alias in actual:
+                mapping[canonical] = alias
+                break
+    return mapping
+
+
 def iter_raw_records(csv_files: list[Path]) -> Iterator[tuple[str, str, str, str]]:
-    expected = {"request_id", "user_id", "raw_prompt", "timestamp"}
+    required = ("request_id", "user_id", "raw_prompt", "timestamp")
     for csv_path in csv_files:
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            missing = expected - set(reader.fieldnames or [])
+            mapping = _canon_fieldnames(reader.fieldnames or [])
+            missing = [c for c in required if c not in mapping]
             if missing:
                 raise ValueError(
-                    f"{csv_path}: missing required columns {missing}. "
-                    f"Found: {reader.fieldnames}"
+                    f"{csv_path}: missing columns {missing}. "
+                    f"Found: {reader.fieldnames}. "
+                    f"Accepted aliases: {list(COLUMN_ALIASES)}"
                 )
             for row in reader:
                 yield (
-                    row["request_id"],
-                    row["user_id"],
-                    row["raw_prompt"],
-                    row["timestamp"],
+                    row[mapping["request_id"]],
+                    row[mapping["user_id"]],
+                    row[mapping["raw_prompt"]],
+                    row[mapping["timestamp"]],
                 )
 
 

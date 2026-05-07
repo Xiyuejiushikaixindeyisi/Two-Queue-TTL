@@ -34,6 +34,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 from verify_chain_path_closure import (  # noqa: E402
     TrieNode,
+    _canon_fieldnames,
     compute_prefix_path_keys,
     discover_csv_files,
     find_lcp,
@@ -63,11 +64,16 @@ def batch_decode(
     for csv_path in csv_files:
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            mapping = _canon_fieldnames(reader.fieldnames or [])
+            rid_col = mapping.get("request_id")
+            prompt_col = mapping.get("raw_prompt")
+            if not rid_col or not prompt_col:
+                continue
             for row in reader:
-                rid = row.get("request_id")
+                rid = row.get(rid_col)
                 if rid in remaining:
                     n = needed[rid]
-                    blocks = split_blocks(row["raw_prompt"], block_size)
+                    blocks = split_blocks(row[prompt_col], block_size)
                     out[rid] = [
                         b.decode("utf-8", errors="replace") for b in blocks[:n]
                     ]
