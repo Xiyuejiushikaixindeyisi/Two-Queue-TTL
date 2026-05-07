@@ -68,8 +68,12 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 - **算法：** Trie + 双阈值
   - 构建：每条请求按 `prefix_path_keys` 序列插入 trie，节点 count++
   - 查询：从 root 沿最热子节点前进，满足两个阈值才继续：
-    - `branch_threshold`（默认 **0.95**）：`max_child.count / parent.count ≥ X`
+    - `branch_threshold`（默认 **0.45**，2026-04-30 修订）：`max_child.count / parent.count ≥ X`
     - `coverage_threshold`（默认 **0.05**）：`node.count / total_requests ≥ X`
+  - **阈值选择指南（基于 DS-8K 实测结论，详见 `dsk8k_step1_findings.md`）：**
+    - `0.95`：严格闭合，几乎不会 false positive，但生产 prompt 难满足（含时间戳/任务混杂会导致 chain=0）
+    - `0.45`（推荐 default）：识别"主流量主路径 + 容许少数派分支"的真实业务模式
+    - `0.30`：探索性，可能包含次要路径
   - 复杂度：O(total_blocks) 构建，O(chain_length) 查询
   - 性能预估：DS-8K 1M 操作 / 秒级；Agent 128K 上下文 × 10K 请求 = 10M 操作 / ~10 秒，均可接受
 - **内容解码（不依赖 LLM tokenizer）：**
@@ -284,7 +288,10 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-04-30 | Step 1.1 数据流决策 | ✅ | 一步到位（raw CSV → trie），不依赖 convert_raw_trace.py |
 | 2026-04-30 | Step 1.1 算法骨架 | ✅ | `scripts/verify_chain_path_closure.py` 已写完 |
 | 2026-04-30 | Step 1.2 算法骨架 | ✅ | `scripts/per_user_chain_analyzer.py` 已写完，复用 1.1 的 trie/decode 模块 |
-| 2026-04-30 | Step 1.1 + 1.2 真实数据验证 | ⏳ | 等晚上 dsk8k_2h_5k 到位 |
+| 2026-04-30 | Step 1.1 + 1.2 生产数据验证 | ✅ | DS-8K 17K trace 跑通，发现 `dsk8k_step1_findings.md` 详记 |
+| 2026-04-30 | Step 1.1 阈值 default 修订 | ✅ | branch_threshold 0.95 → 0.45（DS-8K 实测结论） |
+| 2026-04-30 | Step 1.3 数据采集 | ⏳ | 待 dsk8k_2h_5k / 24h_10k / 2d_10k 到位 |
+| 2026-04-30 | Step 1.3 算法 + 验证 | ⏳ | 待数据到位后启动 |
 
 ---
 

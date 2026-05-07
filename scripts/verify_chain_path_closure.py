@@ -261,8 +261,10 @@ def parse_args() -> argparse.Namespace:
                    help="Raw CSV file or directory of CSV files (4-column format)")
     p.add_argument("--output", required=True, type=Path,
                    help="Output JSON path")
-    p.add_argument("--branch-threshold", type=float, default=0.95,
-                   help="max_child.count / parent.count threshold (default 0.95)")
+    p.add_argument("--branch-threshold", type=float, default=0.45,
+                   help="max_child.count / parent.count threshold (default 0.45; "
+                        "0.95 = strict closure, 0.45 = recommended for production "
+                        "prompts with timestamps/multi-task mixing)")
     p.add_argument("--coverage-threshold", type=float, default=0.05,
                    help="node.count / total_requests threshold (default 0.05)")
     p.add_argument("--block-size", type=int, default=128,
