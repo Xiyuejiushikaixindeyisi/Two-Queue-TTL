@@ -172,7 +172,7 @@ def decode_chain_content(
 ) -> list[str]:
     """Locate target_request_id and decode its first chain_length blocks."""
     for csv_path in csv_files:
-        with open(csv_path, newline="", encoding="utf-8") as f:
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             mapping = _canon_fieldnames(reader.fieldnames or [])
             rid_col = mapping.get("request_id")
@@ -229,7 +229,7 @@ def _canon_fieldnames(fieldnames: list[str]) -> dict[str, str]:
 def iter_raw_records(csv_files: list[Path]) -> Iterator[tuple[str, str, str, str]]:
     required = ("request_id", "user_id", "raw_prompt", "timestamp")
     for csv_path in csv_files:
-        with open(csv_path, newline="", encoding="utf-8") as f:
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             mapping = _canon_fieldnames(reader.fieldnames or [])
             missing = [c for c in required if c not in mapping]
