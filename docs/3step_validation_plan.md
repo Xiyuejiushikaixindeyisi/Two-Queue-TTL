@@ -95,6 +95,31 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
   - `branch_points`: 路径分叉位置 + 各分支频率
 - **可选模式（multi-chain）：** 在分叉点递归探索，输出多条并行 chain（覆盖多租户 / 多 prompt 场景）
 
+#### 1.2.0 Threshold sweep（推荐先跑，辅助找阈值）
+
+- **目标：** 通过扫描 `branch_threshold ∈ [0, 1]` 步长 0.05 共 21 个点，画图找到合适的阈值
+- **算法：** Trie 只构建一次（与 1.2 一致），21 个阈值复用同一棵树跑 LCP，开销几乎为 0
+- **可视化：**
+  - X 轴：branch_threshold
+  - Y 轴：chain length（每个用户独立一条线 + global 一条特粗黑线）
+  - 头部用户（request share ≥ 20%）：三角形 + 粗线
+  - 其余用户：圆点 + 细线 + 半透明
+  - 推荐 default 阈值（0.45）画一条红色虚线作为参考
+- **待补模块：** `scripts/chain_threshold_sweep.py`
+- **输入：** raw CSV（同 1.1）
+- **输出：** PNG + CSV（同基名同目录）
+- **典型用法：**
+  ```bash
+  python scripts/chain_threshold_sweep.py \
+      --raw-csv data/<model>/raw \
+      --output  outputs/<model>/threshold_sweep.png
+  # 看图选定阈值后，跑下一步：
+  python scripts/per_user_chain_analyzer.py \
+      --raw-csv data/<model>/raw \
+      --branch-threshold <选定阈值> \
+      --output  outputs/<model>/per_user_chains.json
+  ```
+
 #### 1.2 Per-user prefix-path chain detection
 
 - **术语澄清：** 此处 user_id 实际为 **product_id**（每个模型最多 ~37 个产品），不是终端用户
@@ -254,6 +279,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 模块 | Step 1 | Step 2 | Step 3 | 跨模型复用 |
 |------|--------|--------|--------|-----------|
 | `verify_chain_path_closure.py` | ✓ | | | ✓ |
+| `chain_threshold_sweep.py` | ✓ | | | ✓ |
 | `per_user_chain_analyzer.py` | ✓ | | | ✓ |
 | `chain_stability_analyzer.py` | ✓ | | | ✓ |
 | `step1_summary.py` | ✓ | | | ✓ |
@@ -290,6 +316,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-04-30 | Step 1.2 算法骨架 | ✅ | `scripts/per_user_chain_analyzer.py` 已写完，复用 1.1 的 trie/decode 模块 |
 | 2026-04-30 | Step 1.1 + 1.2 生产数据验证 | ✅ | DS-8K 17K trace 跑通，发现 `dsk8k_step1_findings.md` 详记 |
 | 2026-04-30 | Step 1.1 阈值 default 修订 | ✅ | branch_threshold 0.95 → 0.45（DS-8K 实测结论） |
+| 2026-04-30 | Step 1.2.0 阈值扫描可视化 | ✅ | `scripts/chain_threshold_sweep.py`：21 点扫描 + per-user 折线图，trie 单次构建 |
 | 2026-04-30 | Step 1.3 数据采集 | ⏳ | 待 dsk8k_2h_5k / 24h_10k / 2d_10k 到位 |
 | 2026-04-30 | Step 1.3 算法 + 验证 | ⏳ | 待数据到位后启动 |
 
