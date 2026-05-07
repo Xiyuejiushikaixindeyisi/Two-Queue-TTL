@@ -281,6 +281,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | `verify_chain_path_closure.py` | ✓ | | | ✓ |
 | `chain_threshold_sweep.py` | ✓ | | | ✓ |
 | `per_user_chain_analyzer.py` | ✓ | | | ✓ |
+| `render_chains_html.py` | ✓ | | | ✓ |
 | `chain_stability_analyzer.py` | ✓ | | | ✓ |
 | `step1_summary.py` | ✓ | | | ✓ |
 | `probe_cache_capacity.py` | | ✓ | | ✓ |
@@ -317,6 +318,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-04-30 | Step 1.1 + 1.2 生产数据验证 | ✅ | DS-8K 17K trace 跑通，发现 `dsk8k_step1_findings.md` 详记 |
 | 2026-04-30 | Step 1.1 阈值 default 修订 | ✅ | branch_threshold 0.95 → 0.45（DS-8K 实测结论） |
 | 2026-04-30 | Step 1.2.0 阈值扫描可视化 | ✅ | `scripts/chain_threshold_sweep.py`：21 点扫描 + per-user 折线图，trie 单次构建 |
+| 2026-04-30 | Step 1.2 报告 HTML 渲染 | ✅ | `scripts/render_chains_html.py`：JSON → 静态 HTML，5 模块（params/stats/aggregate/global/per-user），合成 lcp_content 显示 |
 | 2026-04-30 | Step 1.3 数据采集 | ⏳ | 待 dsk8k_2h_5k / 24h_10k / 2d_10k 到位 |
 | 2026-04-30 | Step 1.3 算法 + 验证 | ⏳ | 待数据到位后启动 |
 
