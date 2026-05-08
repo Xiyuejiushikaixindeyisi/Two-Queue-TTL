@@ -63,6 +63,10 @@ class Sample:
 
         self.total_requests: int = (payload.get("stats") or {}).get("total_requests", 0)
         self.total_users: int = (payload.get("stats") or {}).get("total_users", 0)
+        # 1.2 analyzer params (branch_threshold / coverage_threshold / block_size).
+        # Required for the cross-sample consistency check — chain comparison is
+        # only meaningful when all samples were analyzed under identical params.
+        self.analyzer_params: dict = payload.get("params") or {}
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
@@ -139,6 +143,36 @@ def stability_tier(mean_jaccard: float) -> str:
     if mean_jaccard >= 0.40:
         return "medium_drift"   # 必须动态准入/退出
     return "unstable"           # chain 优化方向不可行
+
+
+# ---------------------------------------------------------------------------
+# Cross-sample sanity
+# ---------------------------------------------------------------------------
+
+PARAM_KEYS = ("branch_threshold", "coverage_threshold", "block_size")
+
+
+def check_params_consistency(samples: list["Sample"]) -> list[str]:
+    """Return human-readable mismatch lines, or [] if all samples agree.
+
+    Comparing chains across samples that were analyzed with different 1.2
+    params (e.g. one with branch_threshold=0.40 and another with 0.45) is
+    methodologically invalid: any chain-length / Jaccard difference can be
+    attributed either to time drift or to the threshold change, and the two
+    cannot be separated. The caller must either re-run 1.2 with matched
+    params, or explicitly opt in via --allow-mismatched-params.
+    """
+    base = samples[0]
+    base_p = {k: base.analyzer_params.get(k) for k in PARAM_KEYS}
+    msgs: list[str] = []
+    for s in samples[1:]:
+        for k in PARAM_KEYS:
+            v = s.analyzer_params.get(k)
+            if v != base_p[k]:
+                msgs.append(
+                    f"  {s.label}.{k} = {v!r}  vs  {base.label}.{k} = {base_p[k]!r}"
+                )
+    return msgs
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +265,12 @@ def parse_args() -> argparse.Namespace:
         "--output", required=True, type=Path,
         help="Path for chain_stability_report.json",
     )
+    p.add_argument(
+        "--allow-mismatched-params", action="store_true",
+        help="Skip the cross-sample 1.2-params consistency check. Use only "
+             "when intentionally comparing different 1.2 configurations; "
+             "results will not be apples-to-apples.",
+    )
     return p.parse_args()
 
 
@@ -245,12 +285,42 @@ def main() -> None:
 
     print(f"Loaded {len(samples)} samples:", flush=True)
     for s in samples:
+        bp = s.analyzer_params.get("branch_threshold")
+        cp = s.analyzer_params.get("coverage_threshold")
+        bs = s.analyzer_params.get("block_size")
         print(
             f"  {s.label:<8} requests={s.total_requests:>7,} "
             f"users={s.total_users:>4}  global_chain_len={len(s.global_chain_keys)}  "
-            f"({s.path})",
+            f"branch_thr={bp} cov_thr={cp} block={bs}",
             flush=True,
         )
+        print(f"           ({s.path})", flush=True)
+
+    # ---- Cross-sample params consistency ----
+    mismatches = check_params_consistency(samples)
+    if mismatches:
+        header = (
+            "Sample 1.2 analyzer params differ across inputs — chain "
+            "comparison would be methodologically invalid:"
+        )
+        if args.allow_mismatched_params:
+            print(f"\nwarning: {header}", file=sys.stderr)
+            for m in mismatches:
+                print(m, file=sys.stderr)
+            print(
+                "(continuing because --allow-mismatched-params was set)\n",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\nerror: {header}", file=sys.stderr)
+            for m in mismatches:
+                print(m, file=sys.stderr)
+            print(
+                "\nRe-run Step 1.2 on all samples with identical params, or "
+                "pass --allow-mismatched-params to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # ---- Pairwise comparisons ----
     global_pairs = []
@@ -291,6 +361,9 @@ def main() -> None:
                     "total_requests": s.total_requests,
                     "total_users": s.total_users,
                     "global_chain_length": len(s.global_chain_keys),
+                    "analyzer_params": {
+                        k: s.analyzer_params.get(k) for k in PARAM_KEYS
+                    },
                 }
                 for s in samples
             ],
