@@ -5,7 +5,7 @@
 >
 > **当前焦点模型：** DeepSeek-V3.1-8K (DS-8K)
 > **创建时间：** 2026-04-30
-> **最近更新：** 2026-04-30
+> **最近更新：** 2026-05-07
 
 ---
 
@@ -17,7 +17,7 @@
 | **1.2 per-user chain** | ✅ 完工 | `scripts/per_user_chain_analyzer.py` |
 | **1.2.0 阈值扫描可视化** | ✅ 完工 | `scripts/chain_threshold_sweep.py` |
 | **1.2 HTML 渲染器** | ✅ 完工 | `scripts/render_chains_html.py` |
-| **1.3 跨时间稳定性** | ⏸️ 待数据 | 等 `dsk8k_2h_5k / 24h_10k / 2d_10k` 三份采样到位 |
+| **1.3 跨时间稳定性** | ⏸️ 待数据 | 骨架已就位（`scripts/chain_stability_analyzer.py`，2026-05-07）；等 `dsk8k_2h_5k / 24h_10k / 2d_10k` 三份采样到位即可跑 |
 | **Step 2 API 测试** | ⏸️ 阻塞 | 1.3 验证 chain 跨日 Jaccard ≥ 0.7 后启动 |
 | **Step 3 算法设计** | 🚫 禁止启动 | Step 1.3 + Step 2 全部完成后才允许 |
 
@@ -163,7 +163,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
   - **`dsk8k_24h_10k`**：24h 内随机采样 10,000 条
   - **`dsk8k_2d_10k`**：2 天内随机采样 10,000 条
 - **方法：** 三个数据集分别跑 1.1 + 1.2，得到各自的全局 LCP 和 per-user chains，再做对比
-- **待补模块：** `scripts/chain_stability_analyzer.py`
+- **模块：** `scripts/chain_stability_analyzer.py`（骨架就位 2026-05-07；输入为 1.2 JSON artifact，与具体模型解耦）
 - **输出 (`chain_stability_report.json`)：**
   - 每两个样本间的 chain top-N Jaccard 相似度矩阵
   - 每个用户 chain 的跨日漂移率
