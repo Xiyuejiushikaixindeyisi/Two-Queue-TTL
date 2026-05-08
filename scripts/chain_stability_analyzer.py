@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """Step 1.3 — Cross-window chain stability analyzer.
 
-Quantifies how prefix-path chains drift across time windows. Builds the
-trie + LCP for each sample directly from raw CSV (reusing the Step 1.1
-primitives), so `--branch-threshold` and other chain parameters can be
-set on the command line without re-running Step 1.2 first.
+Quantifies how prefix-path chains drift across time windows. Consumes the
+per-user-chain JSON artifacts produced by Step 1.2 and emits a stability
+report covering:
 
-Reusable across models — input is a list of LABEL=DIR pairs naming raw
-CSV directories. Tokenizer-free; offline-safe.
+  * Pairwise top-N Jaccard between samples (global chain block-set)
+  * Per-user chain Jaccard across samples that share a user
+  * Stability tier per the thresholds defined in
+    docs/3step_validation_plan.md §2.2/1.3
+
+Reusable across models — input is a list of LABEL=PATH pairs naming Step 1.2
+JSON outputs, and there is no dependency on any specific tokenizer or model.
+Offline-safe.
+
+Skeleton status (2026-05-07): structure + core computations are in place.
+Threshold-tier wording matches the plan; awaiting the three dsk8k_* samples
+to validate end-to-end. See `docs/3step_validation_plan.md` §2.2/1.3.
 
 Usage
 -----
   python scripts/chain_stability_analyzer.py \\
-      --raw-csv 0506=data/dsk8k_24h_0506/raw \\
-                0507=data/dsk8k_24h_0507/raw \\
-      --branch-threshold 0.40 \\
-      --top-n 20 \\
+      --input  2h=outputs/dsk8k_2h_5k/per_user_chains.json \\
+               24h=outputs/dsk8k_24h_10k/per_user_chains.json \\
+               2d=outputs/dsk8k_2d_10k/per_user_chains.json \\
+      --top-n  20 \\
       --output outputs/dsk8k_step1_3/chain_stability_report.json
 """
 from __future__ import annotations
@@ -23,109 +32,71 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 from typing import Iterable
 
-# Reuse Step 1.1 primitives directly (same trie / hashing / LCP finder).
-sys.path.insert(0, str(Path(__file__).parent))
-from verify_chain_path_closure import (  # noqa: E402
-    TrieNode,
-    compute_prefix_path_keys,
-    discover_csv_files,
-    find_lcp,
-    iter_raw_records,
-    split_blocks,
-    trie_insert,
-)
-
 
 # ---------------------------------------------------------------------------
-# Sample (one raw-CSV dataset → trie → chain keys)
+# Sample loading
 # ---------------------------------------------------------------------------
 
 class Sample:
-    """One raw CSV directory, indexed for stability comparison.
+    """One Step 1.2 JSON output, indexed for stability comparison."""
 
-    Calling .build() runs the same Step 1.1 + 1.2 trie/LCP pipeline that
-    `verify_chain_path_closure.py` and `per_user_chain_analyzer.py` use,
-    so chain definitions stay consistent across the three steps.
-    """
-
-    def __init__(self, label: str, csv_dir: Path):
+    def __init__(self, label: str, path: Path, payload: dict):
         self.label = label
-        self.csv_dir = csv_dir
-        self.global_chain_keys: list[str] = []
+        self.path = path
+        self.payload = payload
+
+        gc = payload.get("global_chain") or {}
+        # Ordered list of prefix_path_key hex strings (one per block).
+        self.global_chain_keys: list[str] = [
+            entry["prefix_path_key"] for entry in gc.get("lcp_content", [])
+        ]
+
+        # user_id -> ordered list of hex prefix_path_keys
         self.user_chains: dict[str, list[str]] = {}
-        self.total_requests: int = 0
-        self.total_users: int = 0
-        self.empty_prompts: int = 0
-        self.build_seconds: float = 0.0
+        for u in payload.get("users", []):
+            keys = [entry["prefix_path_key"] for entry in u.get("lcp_content", [])]
+            self.user_chains[u["user_id"]] = keys
 
-    def build(self, branch_threshold: float, coverage_threshold: float,
-              block_size: int) -> None:
-        csv_files = discover_csv_files(self.csv_dir)
-        if not csv_files:
-            raise FileNotFoundError(
-                f"sample {self.label!r}: no CSV files under {self.csv_dir}"
-            )
+        self.total_requests: int = (payload.get("stats") or {}).get("total_requests", 0)
+        self.total_users: int = (payload.get("stats") or {}).get("total_users", 0)
+        # 1.2 analyzer params (branch_threshold / coverage_threshold / block_size).
+        # Required for the cross-sample consistency check — chain comparison is
+        # only meaningful when all samples were analyzed under identical params.
+        self.analyzer_params: dict = payload.get("params") or {}
 
-        t0 = time.time()
-        global_root = TrieNode()
-        user_roots: dict[str, TrieNode] = defaultdict(TrieNode)
-        n_total = 0
-        n_empty = 0
-
-        for request_id, user_id, raw_prompt, _ts in iter_raw_records(csv_files):
-            n_total += 1
-            if not raw_prompt:
-                n_empty += 1
-                global_root.count += 1
-                user_roots[user_id].count += 1
-                continue
-            blocks = split_blocks(raw_prompt, block_size)
-            keys = compute_prefix_path_keys(blocks)
-            trie_insert(global_root, keys, request_id)
-            trie_insert(user_roots[user_id], keys, request_id)
-
-        global_chain, _ = find_lcp(
-            global_root, branch_threshold, coverage_threshold,
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"Sample({self.label}, requests={self.total_requests}, "
+            f"users={self.total_users}, global_chain_len={len(self.global_chain_keys)})"
         )
-        self.global_chain_keys = [k.hex() for k, _ in global_chain]
-
-        self.user_chains = {}
-        for uid, root in user_roots.items():
-            chain, _ = find_lcp(root, branch_threshold, coverage_threshold)
-            self.user_chains[uid] = [k.hex() for k, _ in chain]
-
-        self.total_requests = n_total
-        self.total_users = len(user_roots)
-        self.empty_prompts = n_empty
-        self.build_seconds = time.time() - t0
 
 
-def parse_sample_specs(spec_pairs: list[str]) -> list[Sample]:
-    """Parse `LABEL=DIR` raw-csv specs."""
+def load_samples(spec_pairs: list[str]) -> list[Sample]:
+    """Parse `LABEL=PATH` pairs and return loaded samples."""
     samples: list[Sample] = []
     seen_labels: set[str] = set()
     for spec in spec_pairs:
         if "=" not in spec:
             raise ValueError(
-                f"--raw-csv value {spec!r} is not LABEL=DIR (e.g. 0506=data/.../raw)"
+                f"--input value {spec!r} is not LABEL=PATH (e.g. 2h=outputs/.../per_user_chains.json)"
             )
         label, _, raw_path = spec.partition("=")
         label = label.strip()
         path = Path(raw_path.strip())
         if not label:
-            raise ValueError(f"empty label in --raw-csv value {spec!r}")
+            raise ValueError(f"empty label in --input value {spec!r}")
         if label in seen_labels:
             raise ValueError(f"duplicate sample label: {label!r}")
         seen_labels.add(label)
         if not path.exists():
             raise FileNotFoundError(f"sample {label!r}: {path} does not exist")
-        samples.append(Sample(label, path))
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        samples.append(Sample(label, path, payload))
     if len(samples) < 2:
         raise ValueError(
             f"chain stability analysis needs ≥2 samples; got {len(samples)}"
@@ -158,11 +129,12 @@ def common_prefix_length(a: list[str], b: list[str]) -> int:
 
 
 def stability_tier(mean_jaccard: float) -> str:
-    """Maps mean Jaccard to plan §2.2/1.3 tiers.
+    """Maps mean Jaccard to the four tiers defined in plan §2.2/1.3.
 
-    The plan thresholds were specified for 7-day stability; the same cutoffs
-    are applied to whatever windows the caller supplied. Tier interpretation
-    should consider the actual time spans of the inputs.
+    The plan thresholds are oriented around 7-day stability; this function
+    applies the same cutoffs to whatever windows the caller supplied. The
+    tier *string* therefore reflects the band; whether the band is interpreted
+    as "7-day stability" depends on the input set passed in.
     """
     if mean_jaccard >= 0.95:
         return "high"           # 静态 pin 可行
@@ -174,10 +146,43 @@ def stability_tier(mean_jaccard: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cross-sample sanity
+# ---------------------------------------------------------------------------
+
+PARAM_KEYS = ("branch_threshold", "coverage_threshold", "block_size")
+
+
+def check_params_consistency(samples: list["Sample"]) -> list[str]:
+    """Return human-readable mismatch lines, or [] if all samples agree.
+
+    Comparing chains across samples that were analyzed with different 1.2
+    params (e.g. one with branch_threshold=0.40 and another with 0.45) is
+    methodologically invalid: any chain-length / Jaccard difference can be
+    attributed either to time drift or to the threshold change, and the two
+    cannot be separated. The caller must either re-run 1.2 with matched
+    params, or explicitly opt in via --allow-mismatched-params.
+    """
+    base = samples[0]
+    base_p = {k: base.analyzer_params.get(k) for k in PARAM_KEYS}
+    msgs: list[str] = []
+    for s in samples[1:]:
+        for k in PARAM_KEYS:
+            v = s.analyzer_params.get(k)
+            if v != base_p[k]:
+                msgs.append(
+                    f"  {s.label}.{k} = {v!r}  vs  {base.label}.{k} = {base_p[k]!r}"
+                )
+    return msgs
+
+
+# ---------------------------------------------------------------------------
 # Pairwise comparisons
 # ---------------------------------------------------------------------------
 
-def compare_global_chain(a: Sample, b: Sample, top_n: int) -> dict:
+def compare_global_chain(
+    a: Sample, b: Sample, top_n: int,
+) -> dict:
+    """Compare the two samples' global chain block sets, capped at top_n."""
     a_keys = a.global_chain_keys[:top_n]
     b_keys = b.global_chain_keys[:top_n]
     return {
@@ -191,17 +196,19 @@ def compare_global_chain(a: Sample, b: Sample, top_n: int) -> dict:
     }
 
 
-def compare_per_user(a: Sample, b: Sample, top_n: int) -> dict:
+def compare_per_user(
+    a: Sample, b: Sample, top_n: int,
+) -> dict:
+    """Per-user chain Jaccard for users present in both samples."""
     shared = sorted(set(a.user_chains) & set(b.user_chains))
     user_rows = []
     js: list[float] = []
     for uid in shared:
         ua = a.user_chains[uid][:top_n]
         ub = b.user_chains[uid][:top_n]
+        # Skip users with no chain in either sample — these are uninformative
+        # (Jaccard would be the empty-set convention 1.0 and bias the mean).
         if not ua and not ub:
-            # Both samples have no chain for this user — uninformative;
-            # would push Jaccard toward 1.0 by the empty-set convention and
-            # bias the mean upward.
             continue
         j = jaccard(ua, ub)
         js.append(j)
@@ -213,8 +220,10 @@ def compare_per_user(a: Sample, b: Sample, top_n: int) -> dict:
             "jaccard": round(j, 4),
             "drift": round(1.0 - j, 4),
         })
+
     only_a = sorted(set(a.user_chains) - set(b.user_chains))
     only_b = sorted(set(b.user_chains) - set(a.user_chains))
+
     return {
         "sample_a": a.label,
         "sample_b": b.label,
@@ -244,15 +253,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "--raw-csv", required=True, nargs="+", metavar="LABEL=DIR",
-        help="≥2 labelled raw CSV directories "
-             "(e.g. 0506=data/dsk8k_24h_0506/raw 0507=data/dsk8k_24h_0507/raw)",
+        "--input", required=True, nargs="+", metavar="LABEL=PATH",
+        help="≥2 Step 1.2 JSON outputs, each tagged with a label "
+             "(e.g. 2h=outputs/.../per_user_chains.json)",
     )
-    p.add_argument("--branch-threshold", type=float, default=0.45,
-                   help="default 0.45 (recommended for production); "
-                        "0.95 for strict closure")
-    p.add_argument("--coverage-threshold", type=float, default=0.05)
-    p.add_argument("--block-size", type=int, default=128)
     p.add_argument(
         "--top-n", type=int, default=20,
         help="Number of leading blocks of each chain to compare (default: 20)",
@@ -261,6 +265,12 @@ def parse_args() -> argparse.Namespace:
         "--output", required=True, type=Path,
         help="Path for chain_stability_report.json",
     )
+    p.add_argument(
+        "--allow-mismatched-params", action="store_true",
+        help="Skip the cross-sample 1.2-params consistency check. Use only "
+             "when intentionally comparing different 1.2 configurations; "
+             "results will not be apples-to-apples.",
+    )
     return p.parse_args()
 
 
@@ -268,30 +278,49 @@ def main() -> None:
     args = parse_args()
 
     try:
-        samples = parse_sample_specs(args.raw_csv)
+        samples = load_samples(args.input)
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(
-        f"Building chains for {len(samples)} samples  "
-        f"(branch_thr={args.branch_threshold}, "
-        f"cov_thr={args.coverage_threshold}, block={args.block_size})",
-        flush=True,
-    )
+    print(f"Loaded {len(samples)} samples:", flush=True)
     for s in samples:
-        try:
-            s.build(args.branch_threshold, args.coverage_threshold, args.block_size)
-        except FileNotFoundError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
+        bp = s.analyzer_params.get("branch_threshold")
+        cp = s.analyzer_params.get("coverage_threshold")
+        bs = s.analyzer_params.get("block_size")
         print(
             f"  {s.label:<8} requests={s.total_requests:>7,} "
-            f"users={s.total_users:>4}  empty={s.empty_prompts:>4}  "
-            f"global_chain_len={len(s.global_chain_keys):>4}  "
-            f"({s.build_seconds:.1f}s, {s.csv_dir})",
+            f"users={s.total_users:>4}  global_chain_len={len(s.global_chain_keys)}  "
+            f"branch_thr={bp} cov_thr={cp} block={bs}",
             flush=True,
         )
+        print(f"           ({s.path})", flush=True)
+
+    # ---- Cross-sample params consistency ----
+    mismatches = check_params_consistency(samples)
+    if mismatches:
+        header = (
+            "Sample 1.2 analyzer params differ across inputs — chain "
+            "comparison would be methodologically invalid:"
+        )
+        if args.allow_mismatched_params:
+            print(f"\nwarning: {header}", file=sys.stderr)
+            for m in mismatches:
+                print(m, file=sys.stderr)
+            print(
+                "(continuing because --allow-mismatched-params was set)\n",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\nerror: {header}", file=sys.stderr)
+            for m in mismatches:
+                print(m, file=sys.stderr)
+            print(
+                "\nRe-run Step 1.2 on all samples with identical params, or "
+                "pass --allow-mismatched-params to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # ---- Pairwise comparisons ----
     global_pairs = []
@@ -316,6 +345,7 @@ def main() -> None:
         round(sum(user_jaccard_means) / len(user_jaccard_means), 4)
         if user_jaccard_means else None
     )
+
     overall_tier = (
         stability_tier(overall_user_mean) if overall_user_mean is not None else None
     )
@@ -323,19 +353,17 @@ def main() -> None:
     # ---- Output ----
     report = {
         "params": {
-            "branch_threshold": args.branch_threshold,
-            "coverage_threshold": args.coverage_threshold,
-            "block_size": args.block_size,
             "top_n": args.top_n,
             "samples": [
                 {
                     "label": s.label,
-                    "csv_dir": str(s.csv_dir),
+                    "path": str(s.path),
                     "total_requests": s.total_requests,
                     "total_users": s.total_users,
-                    "empty_prompts": s.empty_prompts,
                     "global_chain_length": len(s.global_chain_keys),
-                    "build_seconds": round(s.build_seconds, 2),
+                    "analyzer_params": {
+                        k: s.analyzer_params.get(k) for k in PARAM_KEYS
+                    },
                 }
                 for s in samples
             ],

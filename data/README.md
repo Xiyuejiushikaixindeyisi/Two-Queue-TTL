@@ -95,11 +95,10 @@ for ds in dsk8k_24h_0506 dsk8k_24h_0507; do
         --input outputs/$ds/per_user_chains.json
 done
 
-# 1.3 跨日稳定性（直接读 raw CSV；threshold 在命令行配置，扫值无需重跑 1.2）
+# 1.3 跨日稳定性（两份 1.2 JSON artifact 作为输入）
 python scripts/chain_stability_analyzer.py \
-    --raw-csv 0506=data/dsk8k_24h_0506/raw \
-              0507=data/dsk8k_24h_0507/raw \
-    --branch-threshold 0.40 \
+    --input 0506=outputs/dsk8k_24h_0506/per_user_chains.json \
+            0507=outputs/dsk8k_24h_0507/per_user_chains.json \
     --top-n 20 \
     --output outputs/dsk8k_step1_3/chain_stability_report.json
 ```
