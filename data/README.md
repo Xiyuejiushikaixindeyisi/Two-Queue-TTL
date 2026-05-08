@@ -20,7 +20,7 @@ data/<dataset_name>/raw/<any-name>.csv
 
 - `<model_short>`：dsk8k / dsk32k / qwen64k / qwen8k 等简短模型代号
 - `<window>`：采集时间窗口（`2h` / `24h` / `2d` / `1w` 等）
-- `<sample_size>`：采样规模（`5k` = 5,000 条，`10k` = 10,000 条）
+- `<sample_size>`：采样规模（`5k` = 5,000 条，`10k` = 10,000 条）；当采样按"自然日"组织、条数不固定时可用日期标签代替（如 `0506` / `0507`）
 
 ---
 
@@ -30,11 +30,12 @@ data/<dataset_name>/raw/<any-name>.csv
 
 | 子目录 | 描述 | 用途 | 状态 |
 |--------|------|------|------|
-| `dsk8k_2h_5k/raw/` | DS-8K 2h 内随机 5,000 条 | Step 1.1/1.2 主样本 + 1.3 短窗口 | ⏳ 待提供 |
-| `dsk8k_24h_10k/raw/` | DS-8K 24h 内随机 10,000 条 | Step 1.3 中窗口稳定性 | ⏳ 待提供 |
-| `dsk8k_2d_10k/raw/` | DS-8K 2 天内随机 10,000 条 | Step 1.3 跨日稳定性 | ⏳ 待提供 |
+| `dsk8k_24h_0506/raw/` | DS-8K 5.6 全天（24h 窗口）随机采样 | Step 1.3 跨日稳定性 day1 | ⏳ 等数据落地 |
+| `dsk8k_24h_0507/raw/` | DS-8K 5.7 全天（24h 窗口）随机采样 | Step 1.3 跨日稳定性 day2 | ⏳ 等数据落地 |
 
-**这三份数据是 Step 1.3 的硬依赖。** 1.3 必须在三份齐备后启动；任何 Step 3 算法实现必须在 1.3 验证完成后才允许。
+**这两份数据是 Step 1.3 的硬依赖。** 1.3 必须在两份齐备后启动；任何 Step 3 算法实现必须在 1.3 验证完成后才允许。
+
+> **命名变更（2026-05-08）：** 原计划 `dsk8k_2h_5k / 24h_10k / 2d_10k` 三份替换为 `dsk8k_24h_0506` + `dsk8k_24h_0507` 两份独立 24h 采样；等价覆盖跨日稳定性需求，2h / 中窗口槽位放弃。
 
 ### 旧数据集（兼容保留）
 
@@ -72,8 +73,8 @@ data/<dataset_name>/raw/<any-name>.csv
 ## 4. 跑分析（数据到位后）
 
 ```bash
-# 三份数据集各跑一遍 1.1 + 1.2 + 1.2.0 + HTML
-for ds in dsk8k_2h_5k dsk8k_24h_10k dsk8k_2d_10k; do
+# 两份数据集各跑一遍 1.2.0 + 1.1 + 1.2 + HTML
+for ds in dsk8k_24h_0506 dsk8k_24h_0507; do
     # 1.2.0 阈值扫描（先看图找阈值）
     python scripts/chain_threshold_sweep.py \
         --raw-csv data/$ds/raw \
@@ -93,6 +94,13 @@ for ds in dsk8k_2h_5k dsk8k_24h_10k dsk8k_2d_10k; do
     python scripts/render_chains_html.py \
         --input outputs/$ds/per_user_chains.json
 done
+
+# 1.3 跨日稳定性（两份 1.2 JSON artifact 作为输入）
+python scripts/chain_stability_analyzer.py \
+    --input 0506=outputs/dsk8k_24h_0506/per_user_chains.json \
+            0507=outputs/dsk8k_24h_0507/per_user_chains.json \
+    --top-n 20 \
+    --output outputs/dsk8k_step1_3/chain_stability_report.json
 ```
 
 ---
