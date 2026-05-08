@@ -163,7 +163,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
   - **`dsk8k_24h_0507`**：5.7 全天（24h 窗口）随机采样
   - 替代原计划的 `dsk8k_2h_5k / 24h_10k / 2d_10k` 三份；两份独立 24h 采样可直接做跨日 Jaccard，比从一份 2d 数据切分更直接
 - **方法：** 两份数据集分别跑 1.1 + 1.2，得到各自的全局 LCP 和 per-user chains，再两两对比
-- **模块：** `scripts/chain_stability_analyzer.py`（骨架就位 2026-05-07；输入为 1.2 JSON artifact，与具体模型解耦）
+- **模块：** `scripts/chain_stability_analyzer.py`（骨架就位 2026-05-07；2026-05-08 重构为 raw-csv 输入 + 命令行直配 chain 参数，与具体模型解耦）
 - **输出 (`chain_stability_report.json`)：**
   - 每两个样本间的 chain top-N Jaccard 相似度矩阵
   - 每个用户 chain 的跨日漂移率
@@ -343,6 +343,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-07 | Step 1.3 算法骨架 | ✅ | `scripts/chain_stability_analyzer.py` 写完；输入为 1.2 JSON artifact，与具体模型解耦 |
 | 2026-05-08 | Step 1.3 数据集命名变更 | ✅ | 用户改用 `dsk8k_24h_0506` + `dsk8k_24h_0507` 两份独立 24h 采样替代原 `2h_5k / 24h_10k / 2d_10k` 三份方案；2h / 中窗口槽位放弃 |
 | 2026-05-08 | Step 1.3 数据落地 | ⏳ | 等 5.6 / 5.7 两份 CSV 拷入 `data/dsk8k_24h_0506/raw/` 与 `data/dsk8k_24h_0507/raw/` |
+| 2026-05-08 | Step 1.3 接口重构 | ✅ | `chain_stability_analyzer.py` 改为 raw-csv 输入 + 命令行直配 `--branch-threshold` 等；扫 threshold 无需重跑 1.2；上次 commit 加的 params consistency guard 在新接口下变冗余被删除 |
 
 ---
 
