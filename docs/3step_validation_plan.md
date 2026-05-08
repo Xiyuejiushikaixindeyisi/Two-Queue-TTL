@@ -23,6 +23,7 @@
 
 **最新决议（2026-04-30）：** branch_threshold default 修订 0.95 → 0.45。
 **DS-8K 实证：** 56-block chain，41.2% 覆盖；详见 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md)。
+**通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
 **完整进度日志：** §7。
 
 ---
