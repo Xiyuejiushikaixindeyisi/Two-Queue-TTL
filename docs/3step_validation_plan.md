@@ -25,6 +25,7 @@
 **DS-8K 实证：** 56-block chain，41.2% 覆盖；详见 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md)。
 **通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
 **多模型画像（7 模型）：** 二维分类、复用倒置、chain ≠ 命中率，详见 [`model_portraits.md`](model_portraits.md)（2026-05-11）。**DS-8K 是 7 种画像之一，不是普适基线。**
+**Step 1.5 实验设计（待编码）：** Per-user 深度报告 + multi-chain forest，设计定稿见 [`per_user_research_design.md`](per_user_research_design.md)（2026-05-11，D1–D8 全部 ack）。
 **完整进度日志：** §7。
 
 ---
