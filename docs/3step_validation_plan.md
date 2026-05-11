@@ -25,7 +25,7 @@
 **DS-8K 实证：** 56-block chain，41.2% 覆盖；详见 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md)。
 **通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
 **多模型画像（7 模型）：** 二维分类、复用倒置、chain ≠ 命中率，详见 [`model_portraits.md`](model_portraits.md)（2026-05-11）。**DS-8K 是 7 种画像之一，不是普适基线。**
-**Step 1.5 实验设计（待编码）：** Per-user 深度报告 + multi-chain forest，设计定稿见 [`per_user_research_design.md`](per_user_research_design.md)（2026-05-11，D1–D8 全部 ack）。
+**Step 1.5（编码完成，待生产数据验证）：** Per-user 深度报告 + multi-chain forest，设计见 [`per_user_research_design.md`](per_user_research_design.md)（2026-05-11，D1–D8 全部 ack）；三个脚本 `multi_chain_finder.py` / `per_user_report_analyzer.py` / `render_user_report_html.py` 已就位（2026-05-11，本地合成 trace smoke test 通过）。
 **完整进度日志：** §7。
 
 ---
@@ -347,6 +347,8 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-08 | Step 1.3 数据集命名变更 | ✅ | 用户改用 `dsk8k_24h_0506` + `dsk8k_24h_0507` 两份独立 24h 采样替代原 `2h_5k / 24h_10k / 2d_10k` 三份方案；2h / 中窗口槽位放弃 |
 | 2026-05-08 | Step 1.3 数据落地 | ⏳ | 等 5.6 / 5.7 两份 CSV 拷入 `data/dsk8k_24h_0506/raw/` 与 `data/dsk8k_24h_0507/raw/` |
 | 2026-05-08 | Step 1.3 接口契约最终确定 | ✅ | 短暂尝试过 raw-csv 输入 + CLI threshold（commit b8e8e95）后 revert。最终契约：1.3 只接受 ≥2 份 1.2 JSON 作为输入，threshold 由用户在 1.2 阶段统一保证，1.3 用 params consistency guard 校验一致性后做对比。理由：1.3 不应重做 trie，违背 step 单一职责（1.2 = chain 提取，1.3 = chain 比较） |
+| 2026-05-11 | 7 模型画像 + Step 1.5 设计 | ✅ | `model_portraits.md` + `per_user_research_design.md` 沉淀；D1–D8 八个决策点全部 ack；multi-chain 阈值与单 chain 解耦（mc-* namespace，default 0.05/0.05） |
+| 2026-05-11 | Step 1.5 三个模块编码完成 | ✅ | `multi_chain_finder.py`（primitive） + `per_user_report_analyzer.py`（编排器） + `render_user_report_html.py`（SVG inline HTML 渲染）；本地合成 trace 上 end-to-end smoke test 通过；待生产数据集验证 |
 
 ---
 
