@@ -349,6 +349,8 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-08 | Step 1.3 接口契约最终确定 | ✅ | 短暂尝试过 raw-csv 输入 + CLI threshold（commit b8e8e95）后 revert。最终契约：1.3 只接受 ≥2 份 1.2 JSON 作为输入，threshold 由用户在 1.2 阶段统一保证，1.3 用 params consistency guard 校验一致性后做对比。理由：1.3 不应重做 trie，违背 step 单一职责（1.2 = chain 提取，1.3 = chain 比较） |
 | 2026-05-11 | 7 模型画像 + Step 1.5 设计 | ✅ | `model_portraits.md` + `per_user_research_design.md` 沉淀；D1–D8 八个决策点全部 ack；multi-chain 阈值与单 chain 解耦（mc-* namespace，default 0.05/0.05） |
 | 2026-05-11 | Step 1.5 三个模块编码完成 | ✅ | `multi_chain_finder.py`（primitive） + `per_user_report_analyzer.py`（编排器） + `render_user_report_html.py`（SVG inline HTML 渲染）；本地合成 trace 上 end-to-end smoke test 通过；待生产数据集验证 |
+| 2026-05-12 | Step 1.5 七模型生产数据反向验证 | ✅ | 全部 7 模型跑通 per-user 报告 + chain forest；GLM-V5.1 推断完美命中（7 chain / dom_cov 14.7%）；DS-8K 业务推断从"Agent+工具"撤回为"中文 routing/分类器"；Qwen-64K 三用户模式拆分（主用户长文档、supply 51-block 共享 Claude Code、chipset2 root 分叉）；新发现"几何同源 ≠ 业务同源" / block_size shadow / multi_chain_finder leaf-only 局限 |
+| 2026-05-12 | portraits.md 反向验证修订 | ✅ | 每个 §1.X 加"2026-05-12 实测修订"子节（保留原推断作为历史，新增 ❗✓＋ 三类标记）；新增 §3.5–§3.7 三条 cross-cutting 发现 |
 
 ---
 

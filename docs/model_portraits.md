@@ -1,11 +1,14 @@
 # 模型画像 — KV cache 复用情况按模型分类
 
 > **创建时间：** 2026-05-11
+> **最近修订：** 2026-05-12（Step 1.5 per-user 实测 + chain forest 反向验证）
 > **数据来源：** Maas 平台 2026-04-24 9:00–11:00（Text + Agent 请求）
 > **上游设计：** [`docs/3step_validation_plan.md`](3step_validation_plan.md)
 > **相关单模型深度：** [`docs/dsk8k_step1_findings.md`](dsk8k_step1_findings.md)
 
 本文档汇总 7 个生产模型的离线 trace 分析结果。核心结论：**没有任何模型适合"单一全局静态 pin"，chain 不等于 KV cache 命中率，Step 3 算法不能 one-size-fits-all**。DS-8K 不是普适基线，是 7 种画像之一。
+
+> **2026-05-12 状态**：Step 1.5（per-user 报告 + multi-chain forest）已在全部 7 模型实测完成。每个 §1.X 节末尾追加了"2026-05-12 实测修订"子节，对 2026-05-11 的初版推断做反向验证；推断错的部分用 ❗ 标记，确认的用 ✓ 标记，新增的用 ＋ 标记。三个 cross-cutting 新发现见 §3.5–§3.7。
 
 ---
 
@@ -60,6 +63,29 @@
 **总结**
 Qwen-64K 是理论收益最高的模型，但不是最容易落地的模型。它的高复用来自长文档上下文而不是固定 system prompt。这个模型首先要解决容量问题——如果 cache 容量远小于工作集，任何淘汰算法都很难接近 81.7% 的理论上限。
 
+**2026-05-12 实测修订**
+
+Top-3 用户的 chain forest 实测后，"单租户长文档/skills" 框架不够精确——**Qwen-64K 实际是三种用户模式并存**：
+
+| 用户 | 流量 | hit_rate | chains | branch_pos | 几何 / 业务 |
+|---|---|---|---|---|---|
+| S773（员工助手） | 95.16% | 0.817 | **1** | 0 | 17 block 短 chain；高 hit 来自 user-internal 长文档（与原推断一致）|
+| supply.ioc.rock（供应链多模态） | 3.06% | 0.739 | **10** | **51（全部）** | **51 block 共享前缀 + 10 业务分支**；前缀解码为 Claude Code 风格的 JSON tool schema（`read` / `edit` / `path` / ...）|
+| chipset2（芯片开发） | 1.63% | 0.923 | **7** | **0（全部）** | root 即分叉成 7 条独立长 chain（1172–1802 block）；每条解码为独立的 Claude Code agent persona（`Agent` / `subagent_type` / `worktree`）|
+
+**＋新发现：两个轻度用户都是 Claude Code-style AI coding assistant**（system prompt 是 JSON tool 定义），不是泛"长文档"。
+
+**＋新发现：supply.ioc.rock 是 pin ROI 最高的单一候选**——51 block 共享前缀 pin 后可覆盖 53.9% 该用户流量，ROI = 0.95 block / % cov（仅次于 S773 的 17 block / 56.7%）。原推断完全没识别出此候选。
+
+**＋发现：chipset2 的 92.3% hit rate 远高于 chain leaf cov 累计（41.9% = 8.39% + 6 × 5.59%）**——差值 50+ 个百分点来自 chain prefix 上的非 leaf 命中。这是 `multi_chain_finder` 当前 leaf-only 输出的语义局限（详见 §3.7）。
+
+**✓ 确认原推断**：主用户 S773 chain 仅 17 block 但 hit_rate 81.7%——chain 完全解释不了命中率，必然来自 user-internal 长文档复用。原推断对该用户精确。
+
+**❗修正**：原推断"Qwen-64K 核心优化对象不是 system prompt"仅对主用户成立；supply / chipset2 的核心 ROI 都在 chain pin（特别是 supply 的 51 block 共享前缀）。Step 3 算法需要**按用户类型差异化**：
+- 主用户走 user-LRU + 容量扩张
+- supply.ioc.rock pin 51 block 共享前缀（最高 ROI）
+- chipset2 LRU 或选择性 pin 1–2 条 chain（看业务价值，长 chain 单条 cov 5.6–8.4%）
+
 ---
 
 ### 1.2 Qwen-V3-8B-8K — 高并发单租户总结概括任务
@@ -90,6 +116,20 @@ Qwen-8K reuse p50=0s 很可能存在大规模并发——同一秒内发出数�
 **总结**
 Qwen-8K 是业务体量最大的模型。reuse_time=0s 一方面说明存在高并发共享前缀的机会，另一方面也提示我们当前数据精度（timestamp 秒级）还不足。下一阶段的关键是补 batch 级证据，确认这 72.25% 里有多少是真实线上可利用的跨请求复用。
 
+**2026-05-12 实测修订**
+
+| 用户 | 流量 | hit_rate | chains | dom_cov |
+|---|---|---|---|---|
+| nebula.venussearch | 47.56% | 0.710 | 2 | 24.9% |
+| S773 | 21.40% | 0.728 | 2 | 41.4% |
+| quality_public_sentiment | 11.97% | 0.753 | 2 | 61.8% |
+
+**＋新发现：三用户 hit_rate 高度一致（0.71–0.75）**，**无复用倒置**（Heavy/Light 比 ≈ 1.06）。这是 7 模型中**最均匀**的画像，与 DS-32K / Qwen-32K 的极端分裂模式形成鲜明对比。
+
+**＋新发现：dom_cov 与流量反向相关**（流量小 → 单条 chain 覆盖率高）——重度用户业务多样、单条 chain 占比低；轻度用户业务单一、单条 chain 主导。
+
+**✓ 确认**：reuse p50=0s 数据精度问题保留，Step 2 实测前无法分辨"真复用" vs "batch 内"。
+
 ---
 
 ### 1.4 Qwen-V3-32B-32K — 高并发多租户多样内容
@@ -107,6 +147,20 @@ Qwen-32K 更像企业级文档批量处理或自动化流水线。重度用户�
 
 **总结**
 Qwen-32K 理想 KV cache 命中率只有 21.98%——prefix cache 的业务上限低。Qwen-32K 更应该从**多租户隔离 / request 路由**入手；租户中有些用户存在长且稳定的 system prompt（如 `S0...0773`），针对这部分用户做 prefix cache reuse 提升工作有助于降低总体 TTFT。
+
+**2026-05-12 实测修订**
+
+| 用户 | 流量 | hit_rate | chains | unique_blocks | 备注 |
+|---|---|---|---|---|---|
+| nebula.venussearch | 27.87% | **0.153** | **0** | **2,625,152** | chain forest 为空；2.6M unique（极端多样化）|
+| ai.ocr | 24.52% | 0.379 | 4 | 1,071,846 | 中度复用 |
+| ...000022 | 11.96% | **0.732** | 1 | 29,852 | **chain 主导业务** |
+
+**＋实测倒置幅度 4.79x**（0.153 vs 0.732），远超原推断的 "Light×=2.11 vs Heavy×=1.62" 比例。
+
+**＋新发现：原推断"重度用户内容不同"得到极端确认**——nebula.venussearch 单 user 内 2.6M unique blocks 且 chain forest 为空（在 0.05/0.05 阈值下找不到任何合格 chain）。**这部分 27.87% 流量几乎 0 cache 价值**，Step 3 应当把它彻底排除在 chain 优化外。
+
+**＋新发现：...000022 是 Qwen-32K 内唯一适合 chain pin 的用户**（hit_rate 0.73 + 单条 chain dom_cov 28.9%）；尽管原推断已提"S773 这类长且稳定 prompt 用户"，但实测让 ROI 排序具体化——纳入 pin 候选的应是 ...000022（11.96% 流量、单 chain）而非按流量排序。
 
 ---
 
@@ -149,6 +203,33 @@ DS-8K 很可能是 Agent 或工具调用场景，system prompt 中包含大量�
   - DS-8K 的单条 system prompt 覆盖率低，存在 10 条以上的长 system prompt，无论 pin 住哪条都会导致其他用户的 TTFT 上升，需要针对用户做单独的 KV cache 淘汰队列
   - 存在 prompt 版本漂移风险，system prompt 更新后旧 chain 可能失效，需要监控 chain hash 生命周期；需要将数据采集范围扩大到 24h / 隔天等，观察 system prompt 是否稳定
 
+**2026-05-12 实测修订**
+
+**❗推断撤回："Agent + 工具调用 + few-shot" 业务模式描述错了**。DS-8K 的实际业务是 **multi-task router / 分类器**：system prompt 是中文 "你是 XX 助手，根据 X 判断 Y" 的短 routing template（10–95 block），**不是 Agent 工具定义 JSON schema**（那是 Qwen-64K 轻度用户 supply / chipset2 的画像，详见 §3.5）。
+
+**Top-3 用户的 chain forest 实测**：
+
+| 用户 | 流量 | hit_rate | chains | branch_pos | 业务 |
+|---|---|---|---|---|---|
+| S773（员工助手） | 88.46% | 0.552 | **3** | 0（全部） | 问题分类器 / 会议纪要 / 多轮问答 router |
+| mdata.mdata20180908 | 3.62% | 0.250 | **5** | **13（全部）** | 5 种 JSON → Markdown 模板（RAG 文档生成）|
+| ebg.ioc.efc（企业 IOC） | 3.48% | 0.707 | **6** | 0（全部） | 财务多任务 router（意图分类 / 指标识别 / ...）|
+
+**S773 的 3 条 chain decoded 内容**（验证 router 业务模式）：
+- chain 0（56 block, cov 46.6%）："你是智能助手 Agent 的【问题分类器】" — 主流 routing entry-point
+- chain 1（18 block, cov 9.4%）："你是一个会议纪要总结助手"
+- chain 2（10 block, cov 5.1%）："你是一个专注于多轮问答场景的智能助手"
+
+**❗推断撤回："存在 10 条以上长 system prompt"在单 user 内不成立**——S773 只有 3 条短 chain。**Top-3 用户合计 14 条 chain**（3+5+6），分散在不同用户内；预期全 14 用户总和 30+ chain。修订后的表述：**"跨用户共有 30+ 短 chain，但单 user 内 3-6 条"**。
+
+**＋新发现：S773 chain 0 是 DS-8K 整体最高 ROI 的 pin 候选**——56 block pin 拿 46.6% cov（ROI = 1.20 block / % cov）。pin 它等于把员工助手系统的"问题分类"步骤 prefill 免费。
+
+**＋新发现：mdata 几何与 Qwen-64K 的 supply.ioc.rock 同形**（共享 wrapper + 多业务分叉），但业务完全不同——supply 是 Claude Code，mdata 是 RAG 文档生成（详见 §3.5）。
+
+**＋新发现：S773 是跨模型出现的 product_id 但承载不同业务**——DS-8K 上是 router/分类器（chain 56 block）；Qwen-64K 上是长文档/skills（chain 17 block + user-internal 文档）。**product_id 不等于业务模式**——选模型时业务方按容量 / 任务长度切换。
+
+**✓ 确认**：chain 覆盖率 41–46% / Heavy WS 269K 等 trace-level 数字与原推断一致；TTFT 降低 50%+ 的理论收益仍然成立，但 pin 对象从"56 block 共享 system prompt"改为"S773 chain 0（中文 routing prompt）"。
+
 ---
 
 ### 1.7 DeepSeek-V3.1-32K — 多租户超长 system prompt + 内容多样
@@ -167,6 +248,30 @@ DS-32K 的问题是长前缀属于不同租户，且每个租户的 chain 都很
 
 **总结**
 DS-32K 内多个租户都有自己的超长前缀（尤其是轻度租户）。全局 LRU 下，211 blocks × N 租户会互相驱逐，所以它的主要方向是**租户隔离和 cache 分区**。
+
+**2026-05-12 实测修订**
+
+| 用户 | 流量 | hit_rate | chains | dom_cov |
+|---|---|---|---|---|
+| S773 | 60.79% | **0.089** | 1 | 12.3% |
+| mdata.mdata20180908 | 14.90% | **0.697** | 4 | 22.1% |
+| cloud.ioc.global | 14.65% | **0.041** | 1 | 8.8% |
+
+**＋实测倒置幅度 7.83x**（0.089 vs 0.697），是 7 模型中**最极端的复用倒置**。
+
+**＋新发现：DS-32K 不是简单的"重度 vs 轻度"，是三类分裂**：
+- **类 A（低复用重度）**：S773（60.8% 流量、hit 8.9%）
+- **类 B（高复用中度）**：mdata（14.9% 流量、hit 69.7%）
+- **类 C（低复用中度）**：cloud.ioc.global（14.65% 流量、hit 4.1%！）
+
+cloud.ioc.global 颠覆了"按流量分类"——它和 S773 流量天差地别但同属"低复用"。**类 A 和 类 C 都不适合 chain pin，类 B 是核心 ROI**。
+
+**＋pin ROI 计算（按 §3.1 目标函数）**：
+- mdata = 1062 × (1 − 0.697) × ~200 block ≈ **64K block-miss 可挽回**
+- S773 = 4332 × (1 − 0.089) × ~2 block ≈ 8K block-miss（即使按原推断的 2 block chain 算，ROI 远低于 mdata）
+- cloud.ioc.global = 1044 × (1 − 0.041) × ? ≈ 不值得 pin
+
+**❗修正**：原推断"重度用户 system prompt 只有 2 block" 在实测中没直接验证（实测只暴露 dom_cov + hit_rate，未暴露 chain_length；S773 dom_cov=12.3% + hit_rate=8.9% 暗示其 chain 也短）。**Step 3 应按 hit_rate 排序 pin 候选，不按流量**——mdata 是 DS-32K 内唯一值得 pin 的用户。
 
 ---
 
@@ -229,6 +334,46 @@ DS-32K（1.24 vs 2.46）和 Qwen-32K（1.62 vs 2.11）都出现。**算法层面
 **下一步**：
 - Step 2 实测时直接拿 vLLM 的 `prefix_cache_hit_tokens` 指标，绕过秒精度
 - 或下次采集要求 timestamp 精度到 ms 或 µs
+
+### 3.5 几何同源 ≠ 业务同源（2026-05-12 实测发现）
+
+`multi_chain_finder` 在两个模型上找到了**几何上极相似**的 chain forest 结构，但业务模式完全不同：
+
+| 几何形状 | 模型 A | 模型 B |
+|---|---|---|
+| 共享前缀 + 多业务分叉 | Qwen-64K **supply.ioc.rock**：51 block 共享 + 10 业务分支 | DS-8K **mdata**：13 block 共享 + 5 业务分支 |
+| root 即分叉、多独立 chain | Qwen-64K **chipset2**：7 条独立 chain（root 分叉，每条 1172–1802 block）| DS-8K **S773 / ebg**：3–6 条独立 chain（root 分叉，每条 10–95 block）|
+
+**业务对比**：
+- Qwen-64K supply / chipset2 = **Claude Code AI coding assistant**（system prompt 是 JSON tool schema，`read` / `edit` / `Agent` / `subagent_type` / `worktree`）
+- DS-8K mdata / S773 / ebg = **中文 routing / 分类 / RAG 生成**（"你是 XX 助手，根据 X 判断 Y"风格）
+
+**教训**：**chain forest 的几何形状是工具产物，不能直接读成业务画像**。Step 3 算法选择不能只看 trie 几何——必须解码 chain 内容、看 system prompt 才能判断业务模式。上次 (2026-05-12 早些) 我把"Qwen-64K 轻度用户 = DS-8K 业务模式"作为推断，实测后撤回——此条作为教训钉死。
+
+### 3.6 block_size=128 切块的 prefix-shadow 现象（2026-05-12 实测发现）
+
+DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-8K", "stream": true, "messages": [{"role": "system", "content": "你是…` 开头——理论上前 100+ byte 应该完全相同。**但实测 branch_pos=0**（root 即分叉）。
+
+**原因**：block_size=128 byte 切块让 JSON wrapper 与 system prompt 开头同处于 block 0：
+- block 0 装下 JSON header **+ system prompt 开头几个字符**（"你是智能助手 Agent" vs "你是一个会议纪要" vs "你是一个专注于多轮问答"）
+- block 0 整体内容立刻不同 → `prefix_path_key` 立刻不同 → trie 在 root 就分叉
+
+**这不是 bug，是 KV cache 实际物理行为的反映**。vLLM 生产 cache 也按 block 切，相同的 JSON wrapper 因为与不同 system prompt 同处一个 block 而被算作不同 KV state。换 block_size=32 byte 切块会让前几 block 真正共享，但生产 KV block 也得是同样大小才有 cache reuse。
+
+**结论**：portraits / step1_runbook 提到 "branch_pos=0" 不要直接读成 "完全无共享前缀"——可能只是"共享前缀长度 < block_size"。要看真共享，需要更细粒度的切块（diagnostic-only，不影响 Step 3 决策）。
+
+### 3.7 multi_chain_finder 的 leaf-only 局限（2026-05-12 实测发现）
+
+实测发现 chipset2 (Qwen-64K) 的 hit rate **92.3%** 远高于 chain leaf coverage 累计 **41.9%**（7 条 chain 的 cov 加起来 = 8.39 + 6 × 5.59）。差值 50+ 个百分点来自 **chain prefix 上的非 leaf 命中**：
+
+- 一个请求走 chain 0 的前 1000 block 但没走完 1802 block → 这 1000 block 都算 hit，但它**不算在 chain 0 的 leaf cov（8.39%）里**
+- `multi_chain_finder` 当前**只输出 leaf chain**（[`per_user_research_design.md`](per_user_research_design.md) §5.2 的明确决定，避免 chain forest 包含 `[A] / [A,B] / [A,B,C]` 嵌套冗余），把"部分前缀命中"完全隐藏
+
+**Step 3 算法决策需要的实际数据是 prefix coverage，不是 leaf coverage**。要解决，两个候选方案：
+1. 给 chain dict 加 `path_coverage_pcts[]` 数组（每个 position 一个 cov 值）
+2. 或输出 root → leaf 全路径的 trie 节点 count，让下游自行算累积分布
+
+**这是 `multi_chain_finder` 的 v2 改进项**，目前不阻塞 Step 1.5 / Step 2 推进，但 Step 3 设计阶段必须解决。
 
 ---
 
