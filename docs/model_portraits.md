@@ -184,6 +184,40 @@ GLM-V5.1 的问题是虽然 KV cache 命中率高，但 system prompt 覆盖率�
 **下一步**
 筛查所有 system prompt，如果 system prompt 总量 ≤ 10，则可以根据 system prompt 做多条 KV block 淘汰队列，根据请求到达情况来动态淘汰 block。对 GLM-V5.1 来说**最重要的提升仍然是增加 cache 容量**。
 
+**2026-05-12 实测修订**
+
+业务标注："数存 AI 辅助项目代码生成；天舟人工智能平台"（华为自研 AI 编程平台）。
+请求量 6,821；total blocks 3,095,153；unique blocks 196,641；avg ≈ 454 block / req（≈ 58 KB / req）。
+
+7 条 chain **全部 branch_pos=0**（root 即分叉），无共享前缀。
+
+| chain | length | cov | ROI (block / % cov) |
+|---|---|---|---|
+| **0** | 156 | **14.71%** | **10.6** ⭐ |
+| 1 | 249 | 11.11% | 22.4 |
+| 2 | 122 | 10.39% | 11.7 |
+| 3 | 170 | 7.89% | 21.5 |
+| 4 | 377 | 5.81% | 64.9 |
+| 5 | 174 | 5.57% | 31.2 |
+| 6 | 215 | 5.16% | 41.7 |
+
+7 条 leaf cov 累计 60.64%；剩余 33 个百分点 hit_rate 来自 chain 之外的短模板复用 + 各 chain 内部 prefix 段的复用。
+
+**❗修正**：原推断"chain blocks = 249（约 31,872 tokens）"把 chain 1（次流）当成了主流。**真正的主流是 chain 0 = 156 block / cov 14.71%（≈ 20K tokens）**。249 block 是 chain 1（次流，cov 11.11%）。
+
+**＋新发现**：业务是华为自研 AI 编程平台"天舟"，**不是 Claude Code**（与 Qwen-64K 的 supply / chipset2 不同源；尚需 decoded content 验证 prompt 格式细节）。
+
+**＋新发现**：pin 策略有清晰的阶梯：
+- 仅 pin chain 0：156 block / 14.71% cov
+- pin chain 0+1+2：527 block / **36.21% cov**（甜区）
+- 全 7 条 pin：1,463 block / 60.64% cov
+
+**1,463 block 仅占 unique blocks（196,641）的 0.74%**——"pin 全部 chain forest" 在 GLM 是极低成本高收益策略，远优于 Step 3 决策表里"动态准入/退出"的常规假设。
+
+**＋几何对比**：GLM 与 Qwen-64K 的 chipset2 同为 branch_pos=0 全 root 分叉，但 chain 长度差一个数量级（GLM 122–377 vs chipset2 1172–1802）。前者每条 chain 是"独立任务模板"（中等长度），后者是"完整 agent persona"（极长）。这是 §3.5 "几何同源 ≠ 业务同源" 的又一个实例。
+
+**✓ 确认**：原推断"≥ 6 条长 chain"（实测 7） / "单条 cov 最高 ~15%"（实测 14.71%） / "system prompt 总量 ≤ 10"（实测 7）全部完美命中。"主要提升仍然是增加 cache 容量"仍然成立——unique 196K 是 cache 容量下限，cache < 196K 时 hit rate 必降。
+
 ---
 
 ### 1.6 DeepSeek-V3.1-8K — 固定系统提示 + 短用户输入
