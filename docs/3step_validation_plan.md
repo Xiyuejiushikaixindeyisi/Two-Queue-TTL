@@ -27,6 +27,7 @@
 **通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
 **多模型画像（7 模型）：** 二维分类、复用倒置、chain ≠ 命中率，详见 [`model_portraits.md`](model_portraits.md)（2026-05-11）。**DS-8K 是 7 种画像之一，不是普适基线。**
 **Step 1.5（编码完成，待生产数据验证）：** Per-user 深度报告 + multi-chain forest，设计见 [`per_user_research_design.md`](per_user_research_design.md)（2026-05-11，D1–D8 全部 ack）；三个脚本 `multi_chain_finder.py` / `per_user_report_analyzer.py` / `render_user_report_html.py` 已就位（2026-05-11，本地合成 trace smoke test 通过）。
+**Step 3 算法决策矩阵：** 5 维评估 × 4 算法（路由 / 淘汰 / 池化 / prompt 修改）的入口文档见 [`step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md)（2026-05-12，21 用户全部分类完毕；portraits §2 二维分类已简化为指针）。
 **完整进度日志：** §7。
 
 ---
@@ -355,6 +356,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-12 | portraits.md 反向验证修订 | ✅ | 每个 §1.X 加"2026-05-12 实测修订"子节（保留原推断作为历史，新增 ❗✓＋ 三类标记）；新增 §3.5–§3.7 三条 cross-cutting 发现 |
 | 2026-05-12 | v3 prefix-shadow 自动检测尝试 + 撤回 | ❌→✅ | 曾给 `per_user_report_analyzer.py` 加 byte-level LCP + union-find shadow grouping；生产数据上 false positive（JSON wrapper 共享误报）+ false negative（业务 shadow 漏报）双向失败。完整撤回代码 + 文档；钉死教训：shadow detection 是语义层任务，违反"不依赖 tokenizer"约束，**必须人工标注**。runbook §6 改为人工 SOP；v2 prefix coverage 保留（无歧义） |
 | 2026-05-12 | branch_threshold default 第二次修订 0.45 → 0.25 | ✅ | 生产数据两次实证 0.45 过严：DS-8K 5.6 边界 case（5.6 chain=0、5.7 chain=56）+ 7 模型跨数据集发现 GLM (root ratio 0.15) / Qwen-32B-8K / Qwen-32K 等模型上 chain 分叉 ratio 集中在 0.15–0.45 被系统性漏识。改 default 为 0.25 同时保留 0.45 作为历史对比值；portraits §3.8 钉死实测依据 |
+| 2026-05-12 | Step 3 算法决策矩阵成型 | ✅ | 新建 `step3_algorithm_decision_matrix.md`：5 维评估（业务类型 / cache 压力 / 模型参数 / 请求量 / 命中率）× 4 算法（A 路由 / B 淘汰 / C 池化 / D prompt 修改），21 用户全部分类。新发现：D 主导用户占 ~30% 流量、C 池化优先级被低估、Qwen-32B-8K ags 隐藏 Top-4 候选 hit 0.80。portraits §2 二维分类简化为指针，决策入口移到本文档 |
 
 ---
 

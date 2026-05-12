@@ -377,9 +377,11 @@ cloud.ioc.global 颠覆了"按流量分类"——它和 S773 流量天差地别�
 
 ---
 
-## 2. 二维分类（综合归纳）
+## 2. 二维分类（简化视图）
 
-按 **用户偏斜 × chain 形状** 把 7 个模型分组，每组对应不同的 Step 3 算法方向：
+> **2026-05-12 升级**：本节最初的"用户偏斜 × chain 形状"二维分类只覆盖 2 个维度，对 cache 容量 / 模型参数量 / 请求量级 / 业务类型这些 Step 3 必需的维度判断不足。**完整决策矩阵见 [`docs/step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md)**——按 5 维评估（业务类型 / cache 压力 / 模型参数 / 请求量 / 命中率）→ 4 算法路径（路由 / 淘汰 / 池化 / prompt 修改）。本节保留作快速参考。
+
+按 **用户偏斜 × chain 形状** 把 7 个模型分组的简化视图：
 
 |  | 全局 chain 主导<br>（≥ 1 条 cov ≥ 30%） | 多 prompt 并行<br>（无单一主导） | 业务上限低<br>（hit rate ≤ 25%） |
 |---|---|---|---|
@@ -392,6 +394,8 @@ cloud.ioc.global 颠覆了"按流量分类"——它和 S773 流量天差地别�
 2. **Qwen-64K 是异类**：它的高命中率与 chain 无关，**任何基于 chain 的优化都漏掉它的 81.7% ceiling**；它需要的是大容量 LRU + 文档级 reuse 识别。
 3. **三个模型不在 chain 优化的 ROI 区间**：Qwen-8B-8K（18%）、Qwen-32B-32K（22%）、可能还有一半的 Qwen-32B-8K（不确定）。Step 3 不应该花大力气在它们上。
 4. **GLM / DS-8K / DS-32K** 共同特征：**多条独立长 system prompt 并行**。当前 `verify_chain_path_closure.py` 只走 trie 最重一支，对这种结构系统性低估真实 chain 数量；plan §2.2/1.1 末尾埋的 **multi-chain mode 必须实现**，不再是"可选"。
+
+**注**：上述二维分类的精化（含 ags 隐藏 Top-4 候选、D 主导用户占 ~30% 流量、C 池化优先级被低估等新发现）见 [`step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md) §7。
 
 ---
 
