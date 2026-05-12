@@ -351,6 +351,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-11 | Step 1.5 三个模块编码完成 | ✅ | `multi_chain_finder.py`（primitive） + `per_user_report_analyzer.py`（编排器） + `render_user_report_html.py`（SVG inline HTML 渲染）；本地合成 trace 上 end-to-end smoke test 通过；待生产数据集验证 |
 | 2026-05-12 | Step 1.5 七模型生产数据反向验证 | ✅ | 全部 7 模型跑通 per-user 报告 + chain forest；GLM-V5.1 推断完美命中（7 chain / dom_cov 14.7%）；DS-8K 业务推断从"Agent+工具"撤回为"中文 routing/分类器"；Qwen-64K 三用户模式拆分（主用户长文档、supply 51-block 共享 Claude Code、chipset2 root 分叉）；新发现"几何同源 ≠ 业务同源" / block_size shadow / multi_chain_finder leaf-only 局限 |
 | 2026-05-12 | portraits.md 反向验证修订 | ✅ | 每个 §1.X 加"2026-05-12 实测修订"子节（保留原推断作为历史，新增 ❗✓＋ 三类标记）；新增 §3.5–§3.7 三条 cross-cutting 发现 |
+| 2026-05-12 | v3 prefix-shadow 自动检测尝试 + 撤回 | ❌→✅ | 曾给 `per_user_report_analyzer.py` 加 byte-level LCP + union-find shadow grouping；生产数据上 false positive（JSON wrapper 共享误报）+ false negative（业务 shadow 漏报）双向失败。完整撤回代码 + 文档；钉死教训：shadow detection 是语义层任务，违反"不依赖 tokenizer"约束，**必须人工标注**。runbook §6 改为人工 SOP；v2 prefix coverage 保留（无歧义） |
 
 ---
 

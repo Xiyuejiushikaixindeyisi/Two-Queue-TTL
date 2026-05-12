@@ -1,7 +1,7 @@
 # Step 1 通用实验 SOP — 拿到新生产数据集后如何分析
 
 > **创建时间：** 2026-05-08
-> **最近修订：** 2026-05-12（含 Step 1.5 / v2 prefix coverage / v3 shadow detection）
+> **最近修订：** 2026-05-12（含 Step 1.5 / v2 prefix coverage；v3 shadow detection 尝试后撤回——portraits §3.6 说明）
 > **适用范围：** 任意模型 `<model>` 的生产 trace，符合 [`docs/3step_validation_plan.md` §0.1](3step_validation_plan.md) 的 4 列 raw CSV 标准
 > **上游：** [`docs/3step_validation_plan.md`](3step_validation_plan.md) §2 / [`docs/per_user_research_design.md`](per_user_research_design.md) / [`docs/model_portraits.md`](model_portraits.md)
 > **数据约定：** [`data/README.md`](../data/README.md)
@@ -96,7 +96,7 @@ python scripts/render_chains_html.py \
 
 ---
 
-## 阶段 2 · 用户级深度分析（Step 1.5 + v2 prefix coverage + v3 shadow detection）
+## 阶段 2 · 用户级深度分析（Step 1.5 + v2 prefix coverage）
 
 ### 2.1 Per-user 深度报告
 
@@ -113,14 +113,13 @@ python scripts/per_user_report_analyzer.py \
     # --mc-min-chain-length 10
     # --mc-min-chain-coverage 0.01
     # --mc-max-chains       50
-    # --shadow-min-bytes    64      v3 shadow detection 阈值（byte 数）
 ```
 
 **意义**：选 Top-3 满足 ≥1% 流量门槛的 user，对每个 user 计算四项指标：
 1. **理想 KV cache 命中率**（vLLM block-level，user-internal）
 2. **请求量时序**（间隔分位数 P50/P75/P80/P95 + requests/min 时序）
 3. **new unique block/s 时序**（cache 写入压力 + 累计 WS）
-4. **multi-chain forest**（含 v2 prefix coverage + v3 shadow groups）
+4. **multi-chain forest**（含 v2 prefix coverage 字段；shadow 标注由人工 inspect 完成——见 §6）
 
 ### 2.2 HTML 渲染
 
@@ -131,12 +130,12 @@ python scripts/render_user_report_html.py \
 
 **意义**：生成每 user 一份自包含 HTML（SVG inline，离线可读）。
 
-**HTML 含 6 个章节**：
+**HTML 含 5 个章节**：
 - §1 Banner + 关键指标（reqs / hit_rate / unique_blocks）
 - §2 请求时序图 + 间隔分位数表
 - §3 cache 插入压力（new unique block/s + 累计 WS）
 - §4 LCP 直方图
-- §5 chain forest（含 v2 max_prefix_cov + v3 shadow group 紫标）
+- §5 chain forest（含 v2 max_prefix_cov 字段；shadow 标注靠人工）
 - caveats（timestamp 秒精度声明 / 单租户声明）
 
 **产出目录结构**：
@@ -175,23 +174,10 @@ for c in d['chains']:
     print(f'{c[\"chain_id\"]:>3} {c[\"chain_length\"]:>5} '
           f'{c[\"coverage_pct\"]:>6.2f}% {max_pre_s:>9} '
           f'{str(c[\"branch_at_root_position\"]):>11} {br_s:>9}')
-
-# v3 shadow groups 总览
-overlap = d.get('semantic_prefix_overlap', {})
-groups = overlap.get('shadow_groups', [])
-matrix = overlap.get('matrix', [])
-if groups:
-    print(f'\nShadow groups ({len(groups)}):')
-    for gid, g in enumerate(groups):
-        min_lcp = min(matrix[a][b] for a in g for b in g if a != b)
-        print(f'  group #{gid}: chains {g} share first {min_lcp} bytes '
-              f'(~{min_lcp // 128} blocks)')
-else:
-    print(f'\nNo shadow groups (threshold={overlap.get(\"shadow_min_bytes\")} bytes).')
 "
 ```
 
-输出含 v2 `max_prefix_cov` 字段（chain prefix 最大覆盖率）+ v3 shadow group 总览。
+输出含 v2 `max_prefix_cov` 字段（chain prefix 最大覆盖率）。shadow case 见 §6（人工标注 SOP）。
 
 ### 3.2 跨用户横向对比（v1.5 新输出）
 
@@ -263,57 +249,61 @@ python scripts/chain_stability_analyzer.py \
 | 主用户 chain ≤ 30 block + hit_rate > 80% | user-internal 长内容复用 → **大容量 LRU** | Qwen-64K S773（员工助手） |
 | 多用户 hit_rate 倒置 ≥ 3x | **按 hit_rate 排序 pin**（不按流量） | Qwen-32K（4.8x）/ DS-32K（7.8x） |
 | 多条独立 chain + cov 5–30% / chain | **per-user 多 chain 队列** | DS-8K（router）/ GLM（7 chain） |
-| 多 chain + 检测到 shadow group | **按 shadow group 去重后 pin** | Qwen-32B-8K S773（14 block shadow → 78.75% cov） |
+| 多 chain + 人工标注 shadow（§6） | **按 shadow group 去重后 pin** | Qwen-32B-8K S773（人工标注 14 block shadow → 78.75% cov） |
 | 单 user chain forest 中 max_prefix_cov >> leaf_cov | **pin chain 前缀段**（不 pin 全 chain） | Qwen-64K chipset2（92.3% hit / leaf 41.9%） |
 
 ---
 
-## 6. Shadow group 详解（v3）
+## 6. Shadow group 人工标注 SOP
 
 ### 是什么
 
-v3 自动检测的 chain 集合——这些 chain 在 trie 上 `branch_pos=0`（看似无共享前缀），但 raw_prompt **字节流前 N byte 实际完全相同**。
+chain 之间在 trie 上 `branch_pos=0`（看似无共享前缀），但 decoded content 头部**语义上**共享同一段业务 prompt——例如三条 chain 都以 "你是一个 XX 助手，根据 ..." 开头，只是 XX 不同。
 
-### 为什么会出现
+### 为什么必须人工标注
 
-block_size=128 切块边界打破了语义共享前缀。例如 DS-8K 三条 chain 都以 `{"model": "...","stream": true, "messages": [{"role": "system", "content": "你是…` 开头——前 70+ byte 实际相同，但 block 0（128 byte）整体内容因为 system prompt 开头几个字符不同而不同 → trie 在 root 处分叉。
+曾尝试 v3 自动检测（byte-level LCP + union-find），生产数据上**双向失败**——`{"model":...,"stream":true,"messages":[{"role":"system","content":"`这种 JSON wrapper 在所有请求中都共享 70+ byte 但**不是业务 shadow**（false positive），同时真业务 shadow 因 JSON 字段顺序 / 动态字段 / 微差异等原因被漏报（false negative）。完整失败分析见 portraits §3.6。
+
+**根本原因**：shadow 是语义层判断（"业务模板共享" vs "boilerplate 共享"），byte-level 算法不足；语义层判断需要 LLM tokenizer 或 JSON 解析，违反 plan §0.1 "不依赖 tokenizer" 约束。所以**这件事永远靠人工**。
+
+### 标注流程（每 user 约 5–10 秒）
+
+1. 打开 `outputs/$MODEL/per_user_reports/$APP/user_report.html`
+2. 滚到 §5 chain forest
+3. 对每条 chain 点 "show decoded content" 展开
+4. **跳过** JSON wrapper `{"model":...,"messages":[{"role":"system","content":"`（约前 70 byte，所有 chain 都有）
+5. 看 `"你是一个..."` 开头的实际 system prompt 文本
+6. 心算判断哪些 chain 是相同模板：
+   - "你是一个 XX 助手" 中 XX 实质相同 + 后续任务描述高度相似 → shadow group
+   - "你是 XX" vs "你扮演 YY" → 不同业务，**不是 shadow**
+   - JSON wrapper 之外的 system prompt 开头部分（哪怕只共享 5–10 个字）即可判定 shadow
+
+### 标注沉淀位置
+
+人工标注后写进：
+- 对应模型的 findings 文档（如 `dsk8k_step1_findings.md`）
+- 或 portraits.md §1.X 该模型的 "实测修订" 子节
+- 或 portraits.md §3.6 顶部的 case 表（如发现新 case 加一行）
 
 ### Step 3 业务意义
 
 pin 决策时**同组 chain 应视为一个共享 pin unit**，不重复计算容量。
 
-**例子（Qwen-32B-8K S773）**：
+**例子（Qwen-32B-8K S773，人工标注）**：
 - chain 0: 34 block / leaf_cov 41.45%
 - chain 1: 14 block / leaf_cov 37.30%
-- shadow group `[0, 1]` 共享前 1792 byte (~14 block)
+- 人工判定 chain [0, 1] 共享前 ~14 block 业务模板
 - 朴素累加：48 block 拿 78.75% cov ❌（重复算了 14 block 共享前缀）
 - shadow 修正：**14 + 20 = 34 block 拿 78.75% cov ✓**
 
-### 在 HTML / JSON 中找
+### 截至 2026-05-12 的 4 个已知 case
 
-- **HTML**：§5 chain forest 顶部紫色 "Shadow groups detected" caveat + 每个 chain card header 的紫色 "shadow group #X" 标签（仅当检测到时显示）
-- **JSON**：`chain_forest.json` 顶层 `semantic_prefix_overlap` 字段：
-  ```json
-  {
-    "matrix": [[null, 1792, 0], [1792, null, 0], [0, 0, null]],
-    "shadow_groups": [[0, 1]],
-    "shadow_min_bytes": 64,
-    "unit": "bytes"
-  }
-  ```
-
-### 调整灵敏度
-
-```bash
-# 严格（≥ 1 整 block byte-identical 才算 shadow）
---shadow-min-bytes 128
-
-# 默认（半 block）
---shadow-min-bytes 64
-
-# 宽松（任何 ≥ 32 byte 共享都标）
---shadow-min-bytes 32
-```
+| 模型 | user | shadow group | 共享内容（标注） |
+|---|---|---|---|
+| DS-8K | S00...0773 | chains 共享 JSON wrapper + 中文 system prompt 开头 | 推测，未细查 |
+| Qwen-32B-8K | S00...0773 | chain [0, 1] 前 14 block 几乎完全相同 | 用户标注 |
+| Qwen-32B-8K | quality_public_sentiment | chain [0, 1] 都以 "你是一个文本分析助手" 开头 | 推测 |
+| DS-32K | mdata.mdata20180908 | chain [1, 2] 内容相似度非常高 | 用户标注 |
 
 ---
 
@@ -351,7 +341,7 @@ echo "Done. Open outputs/$MODEL/per_user_reports/*/user_report.html"
 5. **隐私**：`raw_prompt` 含生产业务体（企业 system prompt + 用户输入），**`raw/*.csv` 永远不进 git**（`.gitignore` 已强制屏蔽 `data/**`）。
 6. **离线**：所有工具不依赖在线 tokenizer / 模型加载，可在断网机器运行。
 7. **HTML 中文边界**：decoded_text 按 utf8 字节切片后 utf8 decode，跨 block 边界的中文字符可能显示 `�`——属于正常现象，不影响 chain 检测正确性。
-8. **shadow group ≠ 完整共享**：v3 检测的是 byte-level LCP；如果 chain 在前 N byte 字节级完全相同后**才**因 1 个 byte 不同而分叉，v3 能识别；如果有早期细微差异（如时间戳变化），v3 给出的 byte 数会偏短——但仍是稳健的下界。
+8. **shadow group 由人工标注**：曾尝试自动检测（v3 byte-level LCP），生产数据上双向失败（false positive：JSON wrapper 误报；false negative：fuzzy 业务 shadow 漏报）。流程见 §6。
 
 ---
 
@@ -364,7 +354,7 @@ echo "Done. Open outputs/$MODEL/per_user_reports/*/user_report.html"
 | 1.3 | `scripts/per_user_chain_analyzer.py` | raw CSV 目录 | `per_user_chains.json` | 各 user chain |
 | 1.4 | `scripts/render_chains_html.py` | `per_user_chains.json` | `per_user_chains.html` | 模型级 HTML |
 | 1.5a | `scripts/per_user_report_analyzer.py` | raw CSV 目录 | `user_summary.{json,csv}` + 每 user JSON | v2 prefix coverage + v3 shadow detection |
-| 1.5b | `scripts/render_user_report_html.py` | per_user_reports 目录 | 每 user 一份 HTML | shadow group 紫色标注 |
+| 1.5b | `scripts/render_user_report_html.py` | per_user_reports 目录 | 每 user 一份 HTML | 含 v2 max_prefix_cov；shadow 标注靠人工 |
 | 1.5c | `scripts/multi_chain_finder.py`（CLI debug） | raw CSV 目录 | `chain_forest_global.json` | 全局 multi-chain 探索（不必要日常用） |
 | 1.3 | `scripts/chain_stability_analyzer.py` | ≥ 2 份 `per_user_chains.json` | `chain_stability_report.json` | 跨日 Jaccard + tier |
 

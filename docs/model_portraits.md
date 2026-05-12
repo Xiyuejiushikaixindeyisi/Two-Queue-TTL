@@ -475,11 +475,27 @@ DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-
 - §1.3 S773（Qwen-32B-8K）：shadow 修正后 34 block pin 拿 **78.75% cov**（不是 41.45%）
 - §1.7 mdata（DS-32K）：shadow 修正后 14 block pin 拿 **24.39% cov**（不是 13.94%）
 
-**Step 3 算法义务**：决策时不能盲信 `branch_at_root_position`——必须对 chain 之间 decoded content 头部做语义对比。或在 `multi_chain_finder` v3 阶段引入"semantic prefix overlap detection"作为可选 post-processing。
+**Step 3 算法义务**：决策时不能盲信 `branch_at_root_position`——必须对 chain 之间 decoded content 头部做**人工**语义对比。
 
-**v3 已实施（2026-05-12）**：`per_user_report_analyzer.py` 在解码 chain forest 后自动跑 **byte-level LCP** (raw_prompt 字节流)的 pairwise 计算 + union-find shadow grouping。`chain_forest.json` 顶层新增 `semantic_prefix_overlap` 字段（含 N×N byte LCP 矩阵 + shadow_groups 列表）；CLI 参数 `--shadow-min-bytes`（default 64）控制阈值。HTML 报告在 §5 顶部显示 shadow group 总览（紫色标注），每个 chain card 在 header 标注所属 group。算法直接读 raw_prompt（不用 decoded_text）以避免 utf-8 replace 字符 round-trip 失真。详见 [`per_user_research_design.md` §5.5](per_user_research_design.md)。
+**v3 自动化尝试失败（2026-05-12）**：曾尝试在 `per_user_report_analyzer.py` 加 byte-level LCP + union-find 自动识别 shadow group（`semantic_prefix_overlap` 字段 + HTML 紫色标注）。生产数据双向失败：
 
-实施位置说明：v3 加在 **orchestrator (`per_user_report_analyzer.py`)** 而非 finder 中——因为 shadow detection 需要 raw_prompt bytes 比较，是 finder 解码后的后处理；保持 finder（纯 trie 算法）单一职责。
+| 失败模式 | 根因 |
+|---|---|
+| **False positive** | JSON wrapper（`{"model":...,"stream":true,"messages":[{"role":"system","content":"`）几乎在所有请求里都共享 70+ byte → 任意两条 chain 都会被自动算成 shadow，但 wrapper 共享**不是业务 shadow**，对 pin 决策无价值 |
+| **False negative** | 人工标注的 4 个真实 shadow case 全部漏报。原因可能含：JSON 字段顺序不固定（库实现差异）/ 动态字段（request_id / seed / timestamp）插入到 wrapper 中导致字节级开头就分歧 / chain 间 1–2 byte 微差 |
+
+**为什么不能调阈值救**：两个 failure mode **互斥**——调高 `shadow_min_bytes` 减少 false positive 必然加重 false negative；调低则反之。byte-level LCP 单一信号区分不了 wrapper boilerplate vs 业务 prompt 共享。
+
+**真正需要的能力**（v3 做不到）：
+1. JSON 解析，跳过 wrapper 边界，比较 `messages[0].content`
+2. token / 字符级 fuzzy match（容忍 1–2 byte 微差）
+3. 语义聚类（"你是一个 X 助手" 与 "你是一个 Y 助手" 是相似模板还是不同业务）
+
+这三件事都需要语义层信息，违反 plan §0.1 "不依赖 LLM tokenizer" 约束。
+
+**最终决议**：**shadow detection 不能自动化，必须人工标注**。v3 代码已 revert（`semantic_prefix_overlap` 字段去掉、`--shadow-min-bytes` CLI 删除、HTML 不再有 shadow 紫标）。shadow case 由懂业务的人看 HTML §5 chain forest 的 decoded content 头部判断，标注沉淀进对应模型的 findings 文档或本文 §3.6 上方的 4-case 表。
+
+**钉死的教训**：plan §0.1 "不依赖 tokenizer" 约束的代价之一就是 shadow detection 这类任务必须人工——这是工具自动化能力的合理边界，不是工程问题。未来若 Step 3 放宽该约束（如允许调用 tokenizer 做语义聚类），shadow detection 可以重新尝试。
 
 ### 3.7 multi_chain_finder 的 leaf-only 局限（2026-05-12 实测发现）
 

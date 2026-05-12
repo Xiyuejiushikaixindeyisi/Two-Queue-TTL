@@ -283,7 +283,7 @@ def stat_item(key: str, value: str, sub: str = "") -> str:
     )
 
 
-def render_chain_card(chain: dict, top_cov: float, shadow_info: dict | None) -> str:
+def render_chain_card(chain: dict, top_cov: float) -> str:
     cov = chain["coverage_pct"]
     klass = "chain-card" if cov >= max(0.5 * top_cov, 1.0) else "chain-card minor"
     bp = chain.get("branch_at_root_position")
@@ -299,18 +299,6 @@ def render_chain_card(chain: dict, top_cov: float, shadow_info: dict | None) -> 
     pre_str = (
         f"max_prefix_cov={max_pre:.2f}%" if max_pre is not None else ""
     )
-
-    # v3 shadow group annotation (portraits §3.6): which chains share a
-    # semantic prefix despite branch_pos=0.
-    shadow_str = ""
-    if shadow_info:
-        gid = shadow_info.get("group_id")
-        members = shadow_info.get("members", [])
-        prefix_b = shadow_info.get("prefix_bytes")
-        shadow_str = (
-            f"shadow group #{gid} (chains {members}, "
-            f"share first {prefix_b} bytes)"
-        )
 
     concat_text = "".join(
         (b.get("decoded_text") or "") for b in chain.get("decoded_content", [])
@@ -328,7 +316,6 @@ def render_chain_card(chain: dict, top_cov: float, shadow_info: dict | None) -> 
     <span>{html.escape(pre_str)}</span>
     <span>{html.escape(branch_str)}</span>
     <span>sample_request={html.escape(chain.get('sample_request_id') or '-')}</span>
-    {'<span style="color:#805ad5;font-weight:600">' + html.escape(shadow_str) + '</span>' if shadow_str else ''}
   </div>
   <details>
     <summary>show decoded content ({len(concat_text):,} bytes)</summary>
@@ -398,57 +385,9 @@ def render_user_html(report: dict, forest: dict, total_users: int, total_request
               f"(bucket_size={lcp_q.get('bucket_size', 1)})",
     )
 
-    # Build chain_id -> shadow info lookup (§3.6 v3 detection).
-    overlap = forest.get("semantic_prefix_overlap") or {}
-    shadow_groups = overlap.get("shadow_groups", [])
-    matrix = overlap.get("matrix", [])
-    block_size = (forest.get("params") or {}).get("block_size", 128)
-    chain_to_shadow: dict[int, dict] = {}
-    for gid, group in enumerate(shadow_groups):
-        if not group:
-            continue
-        # Min pairwise prefix (bytes) among group members — floor of what's shared
-        min_prefix_bytes = min(
-            (matrix[a][b] for a in group for b in group if a != b),
-            default=0,
-        )
-        for cid in group:
-            chain_to_shadow[cid] = {
-                "group_id":     gid,
-                "members":      group,
-                "prefix_bytes": min_prefix_bytes,
-                "prefix_blocks_approx": min_prefix_bytes // block_size,
-            }
-
-    chain_cards = "".join(
-        render_chain_card(c, top_cov, chain_to_shadow.get(c["chain_id"]))
-        for c in chains
-    )
+    chain_cards = "".join(render_chain_card(c, top_cov) for c in chains)
     if not chain_cards:
         chain_cards = '<p class="note">No chains satisfied the multi-chain thresholds.</p>'
-
-    # Shadow groups summary (only show if any detected)
-    shadow_summary = ""
-    if shadow_groups:
-        rows = []
-        for gid, group in enumerate(shadow_groups):
-            info = chain_to_shadow[group[0]]
-            b = info["prefix_bytes"]
-            approx_blk = info["prefix_blocks_approx"]
-            rows.append(
-                f'<li>group #{gid}: chains {group} '
-                f'share <strong>first {b} bytes</strong> '
-                f'(≈ {approx_blk} blocks at block_size={block_size}; '
-                f'byte-identical from raw prompt)</li>'
-            )
-        shadow_summary = (
-            f'<div class="caveat" style="border-left-color:#805ad5">'
-            f'<strong>Shadow groups detected ({len(shadow_groups)}):</strong> '
-            f'these chains have branch_pos=0 but actually share a byte-identical '
-            f'leading prefix that block_size chunking split mid-block. Step 3 '
-            f'pin economics should treat each group as one shared-prefix unit.<ul>'
-            f'{"".join(rows)}</ul></div>'
-        )
 
     # Caveats from JSON
     caveats = report.get("caveats", [])
@@ -519,7 +458,6 @@ def render_user_html(report: dict, forest: dict, total_users: int, total_request
   coverage={forest['stats']['total_chains_after_coverage_pruning']} →
   cap={forest['stats']['total_chains_after_max_cap']}
 </div>
-{shadow_summary}
 {chain_cards}
 
 </body></html>

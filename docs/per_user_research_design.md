@@ -303,34 +303,18 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
 
 `coverage_count` 仍然指 leaf count（未改语义，保持向后兼容）。
 
-**v3 新增字段（2026-05-12）—— prefix shadow detection**：
+**v3 prefix shadow detection — 尝试 + 撤回（2026-05-12）**：
 
-`chain_forest.json` 顶层加 `semantic_prefix_overlap` 字段，用于检测 §3.6 的 prefix-shadow 现象——chain 之间在 trie 上 branch_pos=0（root 即分叉）但 raw_prompt 字节级前缀实际相同：
+曾尝试给 `chain_forest.json` 加 `semantic_prefix_overlap` 字段，对 chain pairwise 算 byte-level LCP + union-find 自动识别 shadow group。生产数据上**双向失败**：
 
-```json
-{
-  "semantic_prefix_overlap": {
-    "block_size": 128,
-    "shadow_min_bytes": 64,
-    "unit": "bytes",
-    "matrix": [
-      [null, 98, 98, 0],
-      [98, null, 98, 0],
-      [98, 98, null, 0],
-      [0, 0, 0, null]
-    ],
-    "shadow_groups": [[0, 1, 2]]
-  }
-}
-```
+- **False positive**：JSON wrapper（`{"model":...,"stream":true,"messages":[{"role":"system","content":"`）几乎在所有请求里都存在，70+ byte 共享被算成 shadow，但它不是真业务 shadow
+- **False negative**：人工标注的 4 个真实 shadow case 全部漏报。可能原因：JSON 字段顺序不固定 / 动态字段（request_id / seed / timestamp）插入到 wrapper 中 / chain 间有 1–2 byte 微差
 
-- `matrix[i][j]` = chain i 和 chain j 的 **byte-level LCP**（取 raw_prompt 切到 chain max(length_i, length_j) × block_size byte 上限内的最长公共前缀），对角线为 `null`
-- `shadow_groups` = 通过 union-find 聚合（任何对 LCP ≥ `shadow_min_bytes` 都视为同组）
-- CLI 参数 `--shadow-min-bytes`（default 64，约半个 default block）控制阈值
+两个 failure mode 互斥——调高阈值减少 false positive 必然加重 false negative，反之亦然。**byte-level LCP 单一信号无法区分 wrapper boilerplate 和业务 prompt 共享**——这需要语义层信息（JSON 解析 + token 级 fuzzy match），违反 plan §0.1 "不依赖 LLM tokenizer" 约束。
 
-**关键实现细节**：算法直接读 raw_prompt 而非 `decoded_text`，原因是 utf-8 `errors='replace'` round-trip 失真（单字节 invalid byte → \\ufffd → 3 byte），会让 byte-LCP 全错。raw_prompt 来自 CSV 的 utf-8 字符串，encode 回 utf-8 byte 是稳定的。
+**结论：shadow detection 不能自动化**。`chain_forest.json` 不再输出 `semantic_prefix_overlap` 字段，HTML 不再有 shadow 紫色标注，CLI 参数 `--shadow-min-bytes` 已删除。**shadow case 由人工 inspect HTML 的 chain decoded content 头部标注**，沉淀进对应模型的 findings 文档。
 
-**Step 3 算法义务**：决策 pin 时不能盲信 `branch_at_root_position=0`——必须查 `semantic_prefix_overlap.shadow_groups`，把同组 chain 视为"共享一个前缀 unit"，按合并后 cov 算 ROI。HTML 在 §5 chain forest 顶部和每个 chain card 都显示 shadow group 信息（紫色标注），人工 inspect 时一眼可见。
+**保留**：v2 `coverage_pcts` / `max_prefix_coverage_pct` 字段——这是单 chain 内部信号，没有 wrapper vs 业务的歧义。
 
 ---
 
