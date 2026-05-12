@@ -24,7 +24,7 @@
 ```bash
 # 占位符约定
 MODEL=qwen64k_24h_0510    # 改为实际数据集名（data/README.md §1 命名规则）
-THR=0.45                  # 看阶段 1.1 PNG 后填入
+THR=0.25                  # 看阶段 1.1 PNG 后调整；2026-05-12 改 default 为 0.25（旧 default 0.45 过严，详见 portraits §3.8）
 
 # 落地原始 CSV + 创建输出目录
 mkdir -p data/$MODEL/raw outputs/$MODEL
@@ -215,7 +215,7 @@ print(text[:600])
 ```bash
 DAY1=qwen64k_24h_0510
 DAY2=qwen64k_24h_0511
-THR=0.45
+THR=0.25    # 当前 default (2026-05-12)；跨日比较时两天必须用同一值
 
 # 前置：两份数据集都必须用同一 threshold 跑过 1.2
 for ds in $DAY1 $DAY2; do
@@ -313,7 +313,7 @@ pin 决策时**同组 chain 应视为一个共享 pin unit**，不重复计算�
 #!/usr/bin/env bash
 set -euo pipefail
 MODEL=${1:?usage: $0 <model_dataset_name> [threshold]}
-THR=${2:-0.45}
+THR=${2:-0.25}
 
 mkdir -p outputs/$MODEL
 

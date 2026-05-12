@@ -7,6 +7,8 @@
 >
 > **创建：** 2026-04-30
 > **数据来源：** `data/deepseek_v3.1_8k/raw/DeepSeek-V3.1-Terminus-NoThinking-8K.csv`（生产采样，2 小时窗口，17,312 请求）
+>
+> **阈值 caveat（2026-05-12 注）：** 本文档所有实测数据基于 `branch_threshold=0.45`（当时的工具 default）。该 default 已于 2026-05-12 修订为 **0.25**（见 [`model_portraits.md` §3.8](model_portraits.md)）。要复现本文 chain=56 / 41.2% 等数字，需显式传 `--branch-threshold 0.45`；用新 default 0.25 跑可能得到不同（但通常更长的）chain。
 
 ---
 

@@ -8,7 +8,9 @@
 
 本文档汇总 7 个生产模型的离线 trace 分析结果。核心结论：**没有任何模型适合"单一全局静态 pin"，chain 不等于 KV cache 命中率，Step 3 算法不能 one-size-fits-all**。DS-8K 不是普适基线，是 7 种画像之一。
 
-> **2026-05-12 状态**：Step 1.5（per-user 报告 + multi-chain forest）已在全部 7 模型实测完成。每个 §1.X 节末尾追加了"2026-05-12 实测修订"子节，对 2026-05-11 的初版推断做反向验证；推断错的部分用 ❗ 标记，确认的用 ✓ 标记，新增的用 ＋ 标记。三个 cross-cutting 新发现见 §3.5–§3.7。
+> **2026-05-12 状态**：Step 1.5（per-user 报告 + multi-chain forest）已在全部 7 模型实测完成。每个 §1.X 节末尾追加了"2026-05-12 实测修订"子节，对 2026-05-11 的初版推断做反向验证；推断错的部分用 ❗ 标记，确认的用 ✓ 标记，新增的用 ＋ 标记。Cross-cutting 新发现见 §3.5–§3.8。
+>
+> **阈值 caveat**：本文 §1.X 所有 chain 长度 / coverage 实测数字基于 `branch_threshold=0.45`（当时工具 default）。**该 default 已于 2026-05-12 修订为 0.25**（§3.8）。用新 default 0.25 重跑会得到更长的 chain（在 GLM / Qwen-32B-8K / Qwen-32K 等模型上影响较大）。要复现本文数字必须 explicit 传 `--branch-threshold 0.45`。
 
 ---
 
@@ -511,6 +513,30 @@ DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-
 **这是 `multi_chain_finder` 的 v2 改进项**，目前不阻塞 Step 1.5 / Step 2 推进，但 Step 3 设计阶段必须解决。
 
 **v2 已实施（2026-05-12）**：选择上面的方案 1。`chain_forest.json` 的每条 chain 现在带 `coverage_pcts: list[float]`（chain 上每 position 的覆盖率）+ `max_prefix_coverage_pct`（便利字段，= `coverage_pcts[0]`）。HTML chain card 在 leaf cov 旁边显示 `max_prefix_cov`，chipset2-like 现象（max prefix >> leaf）一眼可见。`coverage_count` / `coverage_pct` 字段语义不变（仍指 leaf），向后兼容。详见 [`per_user_research_design.md` §5.5](per_user_research_design.md)。
+
+### 3.8 branch_threshold default 第二次修订：0.45 → 0.25（2026-05-12）
+
+plan §2.2/1.1 原推荐 default 0.45（2026-04-30 从 0.95 修订）。生产数据两次实证表明 0.45 仍然过严：
+
+**实证 1（2026-05-08，DS-8K 5.6 边界 case）**：DS-8K 5.6 24h 采样在 `branch_threshold=0.45` 下 global chain length = 0；同模型 5.7 采样下 chain length = 56。差异在于 5.6 的关键分叉点 ratio 落在 [0.40, 0.45) 区间——0.45 在临界处把整条 chain 一刀切到 0。教训当时已记入 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md) 但未触发 default 修订。
+
+**实证 2（2026-05-12，7 模型跨数据集）**：实测发现 0.45 系统性漏识"主流但非碾压"chain：
+
+| 模型 | 关键分叉 ratio | THR=0.45 漏识情况 |
+|---|---|---|
+| GLM-V5.1 | 0.15（root 一刀切到 0） | 全部 7 chain 漏识 |
+| Qwen-32K nebula.venussearch | 各支 < 0.05 | chain forest 全空（即使 0.25 也救不了） |
+| Qwen-32B-8K | 各分叉 ~0.20–0.40 | 大部分被砍 |
+| DS-8K 5.6 | ~0.40 | chain=0 |
+
+**修订决议**：单 chain mode (1.1 / 1.2) 的 `--branch-threshold` default 从 0.45 改为 **0.25**。
+- `0.25` 对应"父节点内 ≥ 25% 共走"——容许至多 4 支平分主流，但仍过滤掉真噪声（如 < 5% 小支）
+- `0.45` 作为历史 default 保留在 CLI help 中，用于旧实验对比
+- `0.95` strict closure 不变
+
+**与 multi-chain mode（1.5）的区分**：multi-chain finder 的 `--mc-branch-threshold` default 仍是 **0.05**——目标是"找森林"（包含少数派分支），与单 chain 的"找主干"是不同问题。
+
+**Step 3 算法义务**：所有引用 portraits §1 实测数字（chain length / coverage）的设计文档需要标注用的是 0.25 还是 0.45 default。新数据集分析一律用 0.25，重跑旧分析时 explicit 传 `--branch-threshold 0.45` 才能复现历史数字。
 
 ---
 

@@ -209,9 +209,9 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
 
 ### 5.3 阈值设计（与单 chain 完全解耦）
 
-**为什么不能沿用单 chain default：** 单 chain `branch_threshold=0.45` 在 multi-chain 模式下**几乎肯定误杀**少数派 system prompt。验证：
+**为什么不能沿用单 chain default：** 单 chain `branch_threshold=0.25`（2026-05-12 修订；之前 0.45）在 multi-chain 模式下**仍然会误杀**少数派 system prompt（如 GLM root ratio 0.15）。验证（下表沿用 0.45 作为对照，因为 0.25 仍高于多数 multi-chain 候选）：
 
-| 模型 | root 处某 system prompt 的 ratio | 单 chain default (0.45) | multi-chain default (0.05) |
+| 模型 | root 处某 system prompt 的 ratio | 单 chain default (0.25 / 旧 0.45) | multi-chain default (0.05) |
 |---|---|---|---|
 | GLM-V5.1（8 条 prompt） | 0.15 | 全部拦截 | 全部通过 |
 | DS-8K（10+ 条 prompt） | 主流 0.42 / 其他 0.05–0.10 | 只剩 1 条 | 全部通过 |
@@ -219,9 +219,9 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
 
 **因此 multi-chain 模式使用独立 namespace `--mc-*`，default 显著放松：**
 
-| 参数 | multi-chain default | 对应单 chain default | 理由 |
+| 参数 | multi-chain default | 对应单 chain default (旧 0.45 → 新 0.25) | 理由 |
 |---|---|---|---|
-| `--mc-branch-threshold` | **0.05** | 0.45 | 不误杀 cov ≥ 5% 的少数派分支；深层节点用它筛 noise |
+| `--mc-branch-threshold` | **0.05** | 0.25（旧 0.45） | 不误杀 cov ≥ 5% 的少数派分支；深层节点用它筛 noise |
 | `--mc-coverage-threshold` | **0.05** | 0.05 | 与单 chain 一致；保留"全局 ≥ 5% 才有 ROI"语义 |
 
 注意：在 root 节点上，`branch_threshold` 与 `coverage_threshold` 因 `root.count = total_requests` 而**几乎等价**（前者退化为后者）。`branch_threshold` 的差异化作用主要在深层节点——避免某 child 的 `cov` 通过但 `ratio` 极小（仅占父节点 1‰）这种 noise child 被递归进去。

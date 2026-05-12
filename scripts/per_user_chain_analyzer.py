@@ -107,8 +107,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--raw-csv", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
-    p.add_argument("--branch-threshold", type=float, default=0.45,
-                   help="default 0.45 (recommended for production); 0.95 for strict closure")
+    p.add_argument("--branch-threshold", type=float, default=0.25,
+                   help="default 0.25 (recommended after 05-12 multi-model "
+                        "evidence; 0.45 was the 04-30 default but missed chains "
+                        "with ratio in 0.15-0.45 band); 0.95 for strict closure")
     p.add_argument("--coverage-threshold", type=float, default=0.05)
     p.add_argument("--block-size", type=int, default=128)
     p.add_argument("--max-decoded-blocks", type=int, default=None,

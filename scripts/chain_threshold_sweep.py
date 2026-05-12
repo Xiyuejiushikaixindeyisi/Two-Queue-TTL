@@ -58,9 +58,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--heavy-pct", type=float, default=0.20,
                    help="Users with request share >= this get triangle markers "
                         "(default 0.20)")
-    p.add_argument("--default-threshold", type=float, default=0.45,
-                   help="Vertical reference line on the plot (default 0.45, "
-                        "the recommended production default)")
+    p.add_argument("--default-threshold", type=float, default=0.25,
+                   help="Vertical reference line on the plot (default 0.25, "
+                        "the recommended production default after 05-12 revision; "
+                        "pass 0.45 to compare against the historical 04-30 default)")
     return p.parse_args()
 
 

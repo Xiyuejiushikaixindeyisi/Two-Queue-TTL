@@ -22,6 +22,7 @@
 | **Step 3 算法设计** | 🚫 禁止启动 | Step 1.3 + Step 2 全部完成后才允许 |
 
 **最新决议（2026-04-30）：** branch_threshold default 修订 0.95 → 0.45。
+**第二次修订（2026-05-12）：** branch_threshold default 再次修订 0.45 → **0.25**（生产数据两次实证 0.45 过严：DS-8K 5.6 边界 case + 7 模型跨数据集多 chain 漏识；详见 portraits §3.8）。
 **DS-8K 实证：** 56-block chain，41.2% 覆盖；详见 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md)。
 **通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
 **多模型画像（7 模型）：** 二维分类、复用倒置、chain ≠ 命中率，详见 [`model_portraits.md`](model_portraits.md)（2026-05-11）。**DS-8K 是 7 种画像之一，不是普适基线。**
@@ -89,11 +90,12 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 - **算法：** Trie + 双阈值
   - 构建：每条请求按 `prefix_path_keys` 序列插入 trie，节点 count++
   - 查询：从 root 沿最热子节点前进，满足两个阈值才继续：
-    - `branch_threshold`（默认 **0.45**，2026-04-30 修订）：`max_child.count / parent.count ≥ X`
+    - `branch_threshold`（默认 **0.25**，2026-05-12 修订；上一版 0.45 见下方阈值选择指南）：`max_child.count / parent.count ≥ X`
     - `coverage_threshold`（默认 **0.05**）：`node.count / total_requests ≥ X`
   - **阈值选择指南（基于 DS-8K 实测结论，详见 `dsk8k_step1_findings.md`）：**
     - `0.95`：严格闭合，几乎不会 false positive，但生产 prompt 难满足（含时间戳/任务混杂会导致 chain=0）
-    - `0.45`（推荐 default）：识别"主流量主路径 + 容许少数派分支"的真实业务模式
+    - `0.25`（**当前推荐 default，2026-05-12 修订**）：识别"主流但非碾压"chain（分叉 ratio 在 0.15–0.45 间），覆盖 GLM / Qwen-32B-8K / Qwen-32K 等模型的中等强度主流路径
+    - `0.45`（历史 default，2026-04-30–05-12）：识别"主流量主路径 + 容许少数派分支"；7 模型跨数据集实证表明系统性漏识 chain，仅保留作旧实验对比用
     - `0.30`：探索性，可能包含次要路径
   - 复杂度：O(total_blocks) 构建，O(chain_length) 查询
   - 性能预估：DS-8K 1M 操作 / 秒级；Agent 128K 上下文 × 10K 请求 = 10M 操作 / ~10 秒，均可接受
@@ -125,7 +127,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
   - Y 轴：chain length（每个用户独立一条线 + global 一条特粗黑线）
   - 头部用户（request share ≥ 20%）：三角形 + 粗线
   - 其余用户：圆点 + 细线 + 半透明
-  - 推荐 default 阈值（0.45）画一条红色虚线作为参考
+  - 推荐 default 阈值（**0.25** since 2026-05-12；旧 default 0.45）画一条红色虚线作为参考
 - **待补模块：** `scripts/chain_threshold_sweep.py`
 - **输入：** raw CSV（同 1.1）
 - **输出：** PNG + CSV（同基名同目录）
@@ -352,6 +354,7 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-12 | Step 1.5 七模型生产数据反向验证 | ✅ | 全部 7 模型跑通 per-user 报告 + chain forest；GLM-V5.1 推断完美命中（7 chain / dom_cov 14.7%）；DS-8K 业务推断从"Agent+工具"撤回为"中文 routing/分类器"；Qwen-64K 三用户模式拆分（主用户长文档、supply 51-block 共享 Claude Code、chipset2 root 分叉）；新发现"几何同源 ≠ 业务同源" / block_size shadow / multi_chain_finder leaf-only 局限 |
 | 2026-05-12 | portraits.md 反向验证修订 | ✅ | 每个 §1.X 加"2026-05-12 实测修订"子节（保留原推断作为历史，新增 ❗✓＋ 三类标记）；新增 §3.5–§3.7 三条 cross-cutting 发现 |
 | 2026-05-12 | v3 prefix-shadow 自动检测尝试 + 撤回 | ❌→✅ | 曾给 `per_user_report_analyzer.py` 加 byte-level LCP + union-find shadow grouping；生产数据上 false positive（JSON wrapper 共享误报）+ false negative（业务 shadow 漏报）双向失败。完整撤回代码 + 文档；钉死教训：shadow detection 是语义层任务，违反"不依赖 tokenizer"约束，**必须人工标注**。runbook §6 改为人工 SOP；v2 prefix coverage 保留（无歧义） |
+| 2026-05-12 | branch_threshold default 第二次修订 0.45 → 0.25 | ✅ | 生产数据两次实证 0.45 过严：DS-8K 5.6 边界 case（5.6 chain=0、5.7 chain=56）+ 7 模型跨数据集发现 GLM (root ratio 0.15) / Qwen-32B-8K / Qwen-32K 等模型上 chain 分叉 ratio 集中在 0.15–0.45 被系统性漏识。改 default 为 0.25 同时保留 0.45 作为历史对比值；portraits §3.8 钉死实测依据 |
 
 ---
 
