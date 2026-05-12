@@ -75,6 +75,28 @@ pre.decoded { background: #1a202c; color: #e2e8f0; padding: 10px 14px;
   border-radius: 3px; font-size: 0.78em; overflow-x: auto; white-space: pre-wrap;
   word-break: break-all; max-height: 320px; overflow-y: auto; }
 .note { color: #718096; font-size: 0.85em; font-style: italic; }
+
+/* Step 3 recommendation panel (decision matrix) */
+.rec-panel { padding: 14px 18px; border-radius: 6px; margin: 14px 0; }
+.rec-A { background: #ebf8ff; border-left: 5px solid #3182ce; }     /* routing  -> blue */
+.rec-B { background: #f0fff4; border-left: 5px solid #38a169; }     /* eviction -> green */
+.rec-C { background: #faf5ff; border-left: 5px solid #805ad5; }     /* pooling  -> purple */
+.rec-D { background: #fffaf0; border-left: 5px solid #dd6b20; }     /* prompt   -> orange */
+.rec-header { font-size: 1.05em; font-weight: 600; margin-bottom: 4px; }
+.rec-header .companion { color: #4a5568; font-weight: normal; font-size: 0.85em; }
+.rec-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px; margin: 10px 0; font-size: 0.85em; }
+.rec-meta-key { color: #718096; font-size: 0.8em; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+.rec-meta-value { color: #2d3748; font-weight: 600; margin-top: 1px; }
+.rec-difficulty-low      { color: #2f855a; }
+.rec-difficulty-medium   { color: #b7791f; }
+.rec-difficulty-high     { color: #c05621; }
+.rec-difficulty-very_high { color: #c53030; }
+.rec-section { margin-top: 8px; }
+.rec-section h4 { color: #2d3748; font-size: 0.92em; margin: 8px 0 4px 0; }
+.rec-section ul, .rec-section ol { margin: 0; padding-left: 22px; font-size: 0.88em; }
+.rec-section li { margin-bottom: 2px; }
 """
 
 
@@ -325,6 +347,83 @@ def render_chain_card(chain: dict, top_cov: float) -> str:
 """
 
 
+_ALGO_LABEL = {
+    "A": "A 路由算法 (request 调度 / batch 聚合)",
+    "B": "B 淘汰算法 (chain pin / per-user LRU / 多 chain 队列)",
+    "C": "C KV cache 池化 (容量分区 / KV 量化 / 跨实例共享)",
+    "D": "D prompt 修改 (业务侧重写 / 减少动态字段)",
+}
+
+
+def render_recommendation(rec: dict | None) -> str:
+    """Render Step 3 algorithm recommendation as the HTML §6 panel."""
+    if not rec or not rec.get("primary_algorithm"):
+        return ""
+    primary = rec["primary_algorithm"]
+    companion = rec.get("companion_algorithm")
+    business = rec.get("business_type") or "unknown"
+    evidence = rec.get("business_evidence") or ""
+    difficulty = rec.get("difficulty") or "unknown"
+    estimated = rec.get("estimated_uplift") or {}
+    reasons = rec.get("reasons") or []
+    steps = rec.get("implementation_steps") or []
+
+    primary_label = _ALGO_LABEL.get(primary, primary)
+    companion_str = ""
+    if companion:
+        companion_str = f' <span class="companion">+ 辅菜：{html.escape(_ALGO_LABEL.get(companion, companion))}</span>'
+
+    diff_class = f"rec-difficulty-{difficulty}"
+    uplift_value = estimated.get("value") or "—"
+    uplift_kind = estimated.get("kind") or "—"
+    uplift_conf = estimated.get("confidence") or "—"
+
+    reasons_html = "".join(f"<li>{html.escape(r)}</li>" for r in reasons)
+    steps_html = "".join(f"<li>{html.escape(s)}</li>" for s in steps)
+
+    return f"""
+<h2>6. Step 3 算法推荐</h2>
+<div class="rec-panel rec-{primary}">
+  <div class="rec-header">
+    主菜：{html.escape(primary_label)}{companion_str}
+  </div>
+
+  <div class="rec-meta">
+    <div>
+      <div class="rec-meta-key">业务类型 (启发式)</div>
+      <div class="rec-meta-value">{html.escape(business)}</div>
+      <div class="note">{html.escape(evidence)}</div>
+    </div>
+    <div>
+      <div class="rec-meta-key">预计难度</div>
+      <div class="rec-meta-value {diff_class}">{html.escape(difficulty)}</div>
+    </div>
+    <div>
+      <div class="rec-meta-key">预计提升 ({html.escape(uplift_kind)})</div>
+      <div class="rec-meta-value">{html.escape(uplift_value)}</div>
+      <div class="note">置信度: {html.escape(uplift_conf)}</div>
+    </div>
+  </div>
+
+  <div class="rec-section">
+    <h4>原因 (基于本 user 实测数据)</h4>
+    <ul>{reasons_html}</ul>
+  </div>
+
+  <div class="rec-section">
+    <h4>实施步骤</h4>
+    <ol>{steps_html}</ol>
+  </div>
+
+  <div class="note" style="margin-top: 10px">
+    决策规则: <a href="../../../docs/step3_algorithm_decision_matrix.md">step3_algorithm_decision_matrix.md</a>;
+    业务类型识别是启发式, 边界 case 请人工 inspect §5 chain decoded content;
+    提升估计基于 Step 1 信号, Step 2 实测前不是承诺.
+  </div>
+</div>
+"""
+
+
 def render_user_html(report: dict, forest: dict, total_users: int, total_requests: int) -> str:
     uid = report["user_id"]
     s = report["stats"]
@@ -459,6 +558,8 @@ def render_user_html(report: dict, forest: dict, total_users: int, total_request
   cap={forest['stats']['total_chains_after_max_cap']}
 </div>
 {chain_cards}
+
+{render_recommendation(report.get("step3_recommendation"))}
 
 </body></html>
 """

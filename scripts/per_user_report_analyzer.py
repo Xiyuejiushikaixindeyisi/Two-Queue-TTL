@@ -169,6 +169,221 @@ def lcp_histogram(lcps: list[int]) -> tuple[list[dict], dict]:
     return histogram, quantiles
 
 
+def _infer_business_type(chains: list[dict]) -> tuple[str, str]:
+    """Heuristic business-type inference from decoded chain content.
+
+    Returns (type_id, evidence_snippet). Type_id matches the categories used
+    in docs/step3_algorithm_decision_matrix.md §1.
+
+    Heuristics are intentionally conservative — when ambiguous, returns
+    "unknown" so a human can disambiguate via HTML §5 chain forest.
+    """
+    if not chains:
+        return ("none", "no chains")
+
+    # Sample text from top chain
+    head = chains[0]
+    text = "".join(
+        (b.get("decoded_text") or "") for b in head.get("decoded_content", [])
+    )[:1000]
+    n_chains = len(chains)
+    top_cov = head.get("coverage_pct", 0.0)
+    top_len = head.get("chain_length", 0)
+
+    text_lower = text.lower()
+
+    # Agent / Claude Code style: JSON tool schema
+    if ('"tools":' in text_lower or '"function":' in text_lower) and \
+       ('"parameters"' in text_lower or '"$schema"' in text_lower):
+        return ("agent_tools", "JSON tool schema detected in chain[0]")
+
+    # Multi-task router: "你是XX助手" with several independent chains
+    if n_chains >= 3 and ("你是" in text or "你扮演" in text or "助手" in text):
+        return ("router", f"'你是...助手' style + {n_chains} independent chains")
+
+    # RAG / generation: keywords + 2-3 chains with mid-length
+    rag_kw = ("文档" in text or "RAG" in text or "markdown" in text_lower
+              or "检索" in text or "总结" in text)
+    if rag_kw and 2 <= n_chains <= 6:
+        return ("rag", "RAG/document keywords + multi-chain structure")
+
+    # Classification: short chain + classification keywords
+    if top_len < 30 and ("分类" in text or "归类" in text or "类别" in text):
+        return ("classification", "short chain + classification keywords")
+
+    # Long-doc reuse: very short global chain but the user has high hit_rate
+    # (this is judged at recommendation time using hit_rate, not here)
+    if n_chains == 1 and top_len < 30:
+        return ("short_chain_unknown", "single short chain — check hit_rate")
+
+    return ("unknown", "no heuristic match")
+
+
+def _estimate_uplift(
+    primary: str, hit_rate: float, top_cov_pct: float, n_chains: int,
+    request_pct: float,
+) -> dict:
+    """Order-of-magnitude uplift estimate for the primary algorithm.
+
+    These are heuristics from Step 1 data only; Step 2 measurement is needed
+    for confident numbers. confidence ∈ {"low", "medium"}.
+    """
+    if primary == "D":
+        # Prompt-rewrite — totally business-dependent
+        return {"kind": "hit_rate", "value": "uncertain; +0 to +15pp depending on rewrite scope",
+                "confidence": "low"}
+    if primary == "A":
+        # Routing — depends on batch behavior; Step 2 dependency
+        return {"kind": "ttft", "value": "+10–30% TTFT reduction (batch internal hits)",
+                "confidence": "low"}
+    if primary == "C":
+        # Capacity / pooling — proportional to capacity until WS plateau
+        return {"kind": "hit_rate", "value": "ceiling approaches ideal_hit_rate; "
+                f"needs cache ≥ unique_blocks to fully realize",
+                "confidence": "medium"}
+    # B — chain pin
+    # Upper bound: if user currently misses chain portion, pin recovers
+    # roughly top_cov × (1 − hit_rate) percentage points of hit rate.
+    if top_cov_pct > 0:
+        bound = (top_cov_pct / 100.0) * (1.0 - hit_rate) * 100.0
+        bound_str = f"+{bound:.1f}pp upper bound (chain pin recovers chain-aligned misses)"
+    else:
+        bound_str = "uncertain (no chain dominant)"
+    return {"kind": "hit_rate", "value": bound_str, "confidence": "medium"}
+
+
+def _make_reasons(
+    hit_rate: float, n_chains: int, top_cov_pct: float, top_len: int,
+    unique_blocks: int, new_per_sec_p95: int, business: str,
+) -> list[str]:
+    """Human-readable bullet list explaining the primary recommendation."""
+    reasons = []
+    reasons.append(f"ideal_hit_rate = {hit_rate:.3f}")
+    if n_chains == 0:
+        reasons.append("chain forest 为空 — chain pin 完全无杠杆")
+    else:
+        reasons.append(
+            f"chain forest: {n_chains} 条, dominant_chain length={top_len} block / "
+            f"cov={top_cov_pct:.1f}%"
+        )
+    if unique_blocks >= 1_000_000:
+        reasons.append(f"unique_blocks {unique_blocks:,} ≥ 1M, cache 容量先于 pin")
+    elif unique_blocks >= 200_000:
+        reasons.append(f"unique_blocks {unique_blocks:,} 较大, 容量需关注")
+    if new_per_sec_p95 >= 500:
+        reasons.append(f"insertion rate p95 = {new_per_sec_p95}/s 极高, 路由分流可能必要")
+    if business != "unknown":
+        reasons.append(f"业务类型推断: {business}")
+    return reasons
+
+
+def compute_step3_recommendation(
+    report_stats: dict, chains: list[dict], inter_arrival: dict,
+    new_per_sec_q: dict,
+) -> dict:
+    """Decide primary + companion algorithm per decision matrix §3 rules.
+
+    Inputs are subsets of the user_report fields. Output is a dict written
+    to user_report.json as a top-level field, and rendered as §6 in HTML.
+
+    See docs/step3_algorithm_decision_matrix.md for the underlying rules.
+    """
+    hit_rate = report_stats.get("ideal_hit_rate", 0.0)
+    unique = report_stats.get("unique_blocks", 0)
+    total_reqs = report_stats.get("total_requests", 0)
+    new_p95 = new_per_sec_q.get("p95", 0)
+
+    n_chains = len(chains)
+    top_cov_pct = chains[0]["coverage_pct"] if chains else 0.0
+    top_len = chains[0]["chain_length"] if chains else 0
+
+    business_type, evidence = _infer_business_type(chains)
+
+    # Decision rules per matrix §3 + §6
+    primary, companion = None, None
+
+    # D-first: hit rate too low + chain pin ROI minimal
+    pin_uplift_pp = (top_cov_pct / 100.0) * (1.0 - hit_rate) * 100.0  # rough pp gain
+    if hit_rate < 0.25 and pin_uplift_pp < 5.0:
+        primary = "D"
+        if n_chains > 0:
+            companion = "B"   # 轻 B (pin 仍可救一点点)
+    # C-priority: large model + huge WS + long-doc reuse signature
+    elif unique >= 1_000_000 and hit_rate >= 0.7:
+        primary = "C"
+        if top_len >= 100:
+            companion = "B"
+    # A-priority: high throughput + multi-tenant signal
+    elif new_p95 >= 500 and total_reqs >= 10_000:
+        primary = "A"
+        if n_chains > 0:
+            companion = "B"
+    # B default: chain dominates the business
+    elif n_chains > 0:
+        primary = "B"
+        if unique >= 200_000:
+            companion = "C"
+    else:
+        # No chains and not enough signal to recommend
+        primary = "D"
+        companion = None
+
+    # Difficulty per algorithm and context
+    difficulty_map = {
+        "A": "high",       # routing layer requires infra changes
+        "B": "low",        # vLLM-level chain pin is a known feature
+        "C": "medium",     # capacity expansion is cheap; pooling/quantization harder
+        "D": "high",       # business coordination required
+    }
+    difficulty = difficulty_map.get(primary, "unknown")
+
+    estimated = _estimate_uplift(primary, hit_rate, top_cov_pct, n_chains,
+                                 total_reqs)
+
+    reasons = _make_reasons(
+        hit_rate, n_chains, top_cov_pct, top_len, unique, new_p95,
+        business_type,
+    )
+
+    # Implementation steps per primary algorithm
+    impl_map = {
+        "A": [
+            "在 router 层加 prefix-aware batching (短期可用 vLLM 内置 prefix matching)",
+            "把同 system-prompt 的 request 路由到同实例 (避免 cross-user cache 驱逐)",
+            "Step 2 验证 batch 内 cache 命中行为 (Qwen-32B-8K reuse p50=0s 之谜)",
+        ],
+        "B": [
+            f"识别并 pin top {n_chains} 条 chain (dominant chain {top_len} block / cov {top_cov_pct:.1f}%)",
+            "每条 chain 一个独立 LRU 队列 (避免不同 chain 互相驱逐)",
+            "监控 chain hash 生命周期, prompt 版本漂移时及时刷新 pin",
+            "如有 shadow group (人工标注), 同组 chain 合并为一个 pin unit",
+        ],
+        "C": [
+            f"评估 cache 容量是否能 hold {unique:,} unique blocks",
+            "容量不足时考虑: 物理扩容 / KV 量化 (fp8 或 int8) / 跨实例池化",
+            "重要 chain 配合 B 算法做选择性 pin",
+        ],
+        "D": [
+            "与业务方沟通: 减少 prompt 中的动态字段 (request_id / timestamp / 随机 seed)",
+            "评估 system prompt 是否可以模板化、降低同 user 内多版本漂移",
+            "如业务上限本身低 (如分类任务), 接受 prefix cache 不是主要优化点; 转向 prefill 内核优化",
+        ],
+    }
+    implementation = impl_map.get(primary, [])
+
+    return {
+        "primary_algorithm":  primary,
+        "companion_algorithm": companion,
+        "business_type":      business_type,
+        "business_evidence":  evidence,
+        "reasons":            reasons,
+        "difficulty":         difficulty,
+        "estimated_uplift":   estimated,
+        "implementation_steps": implementation,
+        "_note": "see docs/step3_algorithm_decision_matrix.md for the full rule set",
+    }
+
+
 def walk_chain_leaf(root: TrieNode, hex_keys: list[str]) -> TrieNode:
     """Walk trie along chain keys to find the leaf node. Returns None if path missing."""
     node = root
@@ -388,6 +603,14 @@ def analyze_user(
         ],
     }
 
+    # Step 3 algorithm recommendation (decision matrix §3 rules)
+    user_report["step3_recommendation"] = compute_step3_recommendation(
+        user_report["stats"],
+        forest["chains"],
+        user_report["inter_arrival_gaps_seconds"],
+        user_report["new_unique_blocks_per_sec_q"],
+    )
+
     return user_report, forest, root
 
 
@@ -408,6 +631,7 @@ def write_summary(
         r = user_reports[uid]
         s = r["stats"]
         cs = r["chain_forest_summary"]
+        rec = r.get("step3_recommendation") or {}
         rows.append({
             "user_id":                    uid,
             "request_count":              s["total_requests"],
@@ -420,6 +644,9 @@ def write_summary(
             "p50_gap":                    r["inter_arrival_gaps_seconds"]["p50"],
             "p95_gap":                    r["inter_arrival_gaps_seconds"]["p95"],
             "new_block_per_sec_p95":      r["new_unique_blocks_per_sec_q"]["p95"],
+            "rec_primary":                rec.get("primary_algorithm", ""),
+            "rec_companion":              rec.get("companion_algorithm", "") or "",
+            "rec_difficulty":             rec.get("difficulty", ""),
         })
 
     summary_json = {

@@ -212,7 +212,34 @@ portraits §2 把 Qwen-64K 归到"多 prompt 并行"（multi-chain 队列），�
 
 ---
 
-## 9. 沉淀决策时的工具链
+## 9. 工具自动化（2026-05-12 实施）
+
+§3 的映射规则现在已落地到 `per_user_report_analyzer.py`，每次跑 Step 1.5 自动产出推荐：
+
+- `chain_forest.json` 同级的 `user_report.json` 新增顶层字段 `step3_recommendation`，含 `primary_algorithm` / `companion_algorithm` / `business_type`（启发式推断）/ `reasons` / `difficulty` / `estimated_uplift` / `implementation_steps`
+- `user_summary.csv` 加 3 列：`rec_primary` / `rec_companion` / `rec_difficulty`
+- `user_report.html` §6 渲染推荐板块（4 种主菜算法用不同颜色：A 蓝 / B 绿 / C 紫 / D 橙）
+
+**业务类型启发式**（chain decoded 内容自动识别）：
+- agent_tools（JSON tool schema 含 `"tools"` / `"function"`）
+- router（中文"你是 XX 助手" + ≥ 3 条独立 chain）
+- rag（RAG / 文档 / markdown 关键词 + 2-6 chain）
+- classification（短 chain + 分类关键词）
+- short_chain_unknown / unknown / none（标 unknown 时人工 inspect HTML §5）
+
+业务类型识别仅是启发式（参考 portraits §3.6 / 上文 v3 shadow detection 撤回教训——精确业务识别本质是语义层任务，工具只给候选）；HTML §6 同时显示 evidence_snippet，人工核对成本极低。
+
+提升估计的算法逻辑：
+- B：`top_cov × (1 − hit_rate)` 作为 chain pin 后命中率提升的上界
+- C：命中率上限 = `ideal_hit_rate`（cache 容量充足时）
+- A：依赖 vLLM batch 行为，Step 2 实测前置信度低
+- D：完全业务依赖，无法量化
+
+**重要 caveat**：所有数字都是 Step 1 信号 → 启发式推断，**Step 2 实测前不是承诺**。HTML §6 末尾显式标注此点。
+
+---
+
+## 10. 沉淀决策时的工具链
 
 把上述 5 维评估自动产出的 cookbook：
 
@@ -238,7 +265,7 @@ print(f'hit rate     : {s[\"ideal_hit_rate\"]:.3f}')
 
 ---
 
-## 10. 参考资料
+## 11. 参考资料
 
 - 模型画像 + chain forest 实测：[`docs/model_portraits.md`](model_portraits.md)
 - 实验设计（Step 1.5 D1–D8 决策点）：[`docs/per_user_research_design.md`](per_user_research_design.md)
