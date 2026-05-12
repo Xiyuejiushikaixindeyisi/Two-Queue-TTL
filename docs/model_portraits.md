@@ -343,6 +343,36 @@ cloud.ioc.global 颠覆了"按流量分类"——它和 S773 流量天差地别�
 
 **❗修正**：原推断"重度用户 system prompt 只有 2 block" 在实测中没直接验证（实测只暴露 dom_cov + hit_rate，未暴露 chain_length；S773 dom_cov=12.3% + hit_rate=8.9% 暗示其 chain 也短）。**Step 3 应按 hit_rate 排序 pin 候选，不按流量**——mdata 是 DS-32K 内唯一值得 pin 的用户。
 
+**＋chain forest decoded 揭示业务画像（2026-05-12 补加）**：
+
+模型层数据：total_blocks 2,378,328 / total_requests 7,126 → **avg ≈ 334 block / req（≈ 42 KB / req）**——单条 request 远长于 DS-8K（4 KB / req）。
+
+| 用户 | chain 数 | chain forest 详情 | 业务推断 |
+|---|---|---|---|
+| **S773**（员工助手） | 1 | chain 0：**10 block** / cov 12.35% — "多轮问答场景智能助手，结合对话历史、语音转文字、人工笔记" | **多模态多轮问答**——长 history + 短 system prompt；hit 8.89% 来自重复的 chain（10 block × 12.35% cov）+ 极少跨请求复用 |
+| **mdata**（找不到） | **4** | chain 0：**588 block** / cov 22.13%；chain 1+2：各 14 block / cov 13.94% + 10.45%（用户标注"chain 1 / chain 2 内容相似度非常高"）；chain 3：**815 block** / cov 6.50% | **RAG / 文档生成**——与 DS-8K 上 mdata 同业务但 chain 更长（DS-8K 上 95 block，DS-32K 上 588 + 815 block） |
+| **cloud.ioc.global**（云计算） | 1 | chain 0：60 block / cov 8.81% — "AI 对话质量评估员，识别模型回答中的语义幻觉" | **AI 答案质量评估**——每次输入的"待评估回答"不同，导致 hit_rate 仅 4.08% |
+
+**❗精化"S773 chain 只有 2 block" 推断**：实测 S773 chain length = **10 block**（不是 2），但与"短"的方向一致。重度用户的 chain 仍然短而覆盖率低（cov 12.35%）。
+
+**＋ Pin ROI 重排序（含 §3.6 prefix-shadow 修正：mdata chain 1+2 视为单条 14 block）**：
+
+| 用户 | pin 方案 | 容量 | cov（用户内） | 全局 cov 贡献 | 备注 |
+|---|---|---|---|---|---|
+| **mdata** | chain 1（含 chain 2 shadow） | **14 block** | **24.39%** | 3.6% | **DS-32K 单 pin 最高 ROI**——0.57 block / % cov |
+| mdata | chain 0 单 pin | 588 block | 22.13% | 3.3% | 长但单条 cov 高 |
+| mdata | 全 4 chain pin（shadow 修正）| 1,417 block | 53.02% | 7.9% | 覆盖 mdata 全部主要业务 |
+| S773 | chain 0 单 pin | 10 block | 12.35% | 7.5% | 单条便宜，但用户内 cov 低 |
+| cloud.ioc.global | chain 0 单 pin | 60 block | 8.81% | 1.3% | ROI 中等 |
+
+**＋ §3.6 prefix-shadow 实测确认（DS-32K mdata，第 4 个 case）**：用户明确标注 "chain 1 和 chain 2 内容相似度非常高"，但 branch_pos=0——再一次确认 block_size=128 切块边界打破语义共享前缀。详见 §3.6 升级。
+
+**＋ DS-32K 全局 hit rate 21.89% 的归因**：
+- mdata（14.9% 流量）× 69.67% hit_rate ≈ **10.4 个百分点全局 hit**（一个用户贡献了一半）
+- 其他 85% 流量（S773 + cloud + 9 个小用户）合计贡献 ≈ 11.5 个百分点
+
+**＋ Step 3 算法策略明确化**：cache 优化空间几乎全集中在 mdata 一个用户上（pin 14 block 拿 mdata 内 24% cov，全局贡献 3.6%；pin 1417 block 拿全用户主要业务）。其他用户走 LRU——尤其 S773 60.8% 流量但 chain 只 10 block / cov 12%，pin 几乎无意义。
+
 ---
 
 ## 2. 二维分类（综合归纳）
@@ -431,6 +461,21 @@ DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-
 **这不是 bug，是 KV cache 实际物理行为的反映**。vLLM 生产 cache 也按 block 切，相同的 JSON wrapper 因为与不同 system prompt 同处一个 block 而被算作不同 KV state。换 block_size=32 byte 切块会让前几 block 真正共享，但生产 KV block 也得是同样大小才有 cache reuse。
 
 **结论**：portraits / step1_runbook 提到 "branch_pos=0" 不要直接读成 "完全无共享前缀"——可能只是"共享前缀长度 < block_size"。要看真共享，需要更细粒度的切块（diagnostic-only，不影响 Step 3 决策）。
+
+**状态升级（2026-05-12）：从"现象观察"升级为"频繁实测局限"**。截至当前共有 **4 个实测确认 case**：
+
+| # | 模型 / 用户 | shadow 现象描述 | 来源 |
+|---|---|---|---|
+| 1 | DS-8K S773 | 3 条 chain 都以同 JSON wrapper 开头但 branch_pos=0 | 推测（块大小推算） |
+| 2 | Qwen-32B-8K S773 | **用户标注**："chain 0 和 chain 1 前 14 block 几乎完全相同但 branch_pos=0" | 实测 |
+| 3 | Qwen-32B-8K quality_public_sentiment | 两条 chain 都以 "你是一个文本分析助手" 开头但 branch_pos=0 | 推测（decoded 相同开头） |
+| 4 | DS-32K mdata | **用户标注**："chain 1 和 chain 2 内容相似度非常高" 但 branch_pos=0 | 实测 |
+
+**对 ROI 决策的影响（已落到 portraits 各 §1.X）**：
+- §1.3 S773（Qwen-32B-8K）：shadow 修正后 34 block pin 拿 **78.75% cov**（不是 41.45%）
+- §1.7 mdata（DS-32K）：shadow 修正后 14 block pin 拿 **24.39% cov**（不是 13.94%）
+
+**Step 3 算法义务**：决策时不能盲信 `branch_at_root_position`——必须对 chain 之间 decoded content 头部做语义对比。或在 `multi_chain_finder` v3 阶段引入"semantic prefix overlap detection"作为可选 post-processing。
 
 ### 3.7 multi_chain_finder 的 leaf-only 局限（2026-05-12 实测发现）
 
