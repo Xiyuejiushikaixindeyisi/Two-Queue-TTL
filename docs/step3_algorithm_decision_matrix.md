@@ -58,24 +58,31 @@
 
 ## 3. 5 维 → 4 算法映射规则
 
-### 主菜规则（必选一个）
+### 主菜规则（按优先级自上而下）
 
-| 触发条件 | 主菜算法 |
-|---|---|
-| `ideal_hit_rate < 25%` + chain pin ROI 极低 | **D（业务侧重写）** |
-| 大参数量（≥ 27B）+ `unique_blocks ≥ 1M` + 长文档业务 | **C（池化 + 容量）** |
-| chain 主导业务（cov ≥ 30%）+ chain pin ROI 高（短 chain + 高 cov） | **B（淘汰 + chain pin）** |
-| 高 QPS（≥ 1K req/s）+ 多 user 共享前缀 + `new_block_per_sec_p95 ≥ 500` | **A（路由 + batch 聚合）** |
+| 优先级 | 触发条件 | 主菜算法 | 原因 |
+|---|---|---|---|
+| **1** | **multi_tenant (≥ 3 user) + reuse_inversion (max/min hit_rate ≥ 2.0)** | **A（路由 / cache 隔离）** | **重度低复用用户驱逐其他用户的 chain，路由分区是首选**；即使本 user hit < 25%（D 适用），路由仍是关键以保护其他 user |
+| 2 | `hit_rate < 25%` + chain pin uplift < 5pp | **D（业务侧重写）** | 单租户 / 非倒置场景下业务上限低 |
+| 3 | `unique_blocks ≥ 1M` + `hit_rate ≥ 0.7` | **C（池化 / 容量）** | 大模型 + 高 reuse 已知，瓶颈是容量 |
+| 4 | multi_tenant + `unique ≥ 200K` 或 `new_block_per_sec_p95 ≥ 200` | **A（路由 / batch 聚合）** | 多租户 + 中度压力（即使无倒置）路由分区仍能减少 cross-user 驱逐 |
+| 5 | `chains > 0`（chain 主导业务） | **B（淘汰 / chain pin）** | 默认 |
+| 6 | 无 chain forest 兜底 | **D**（multi 加 A 辅） | |
+
+**2026-05-12 关键修订**：A 优先级从最后一名（高 QPS 触发）提到第一名（reuse_inversion 触发）。原因：复用倒置的核心是"低复用用户驱逐高复用用户的 chain"，**路由按 user 隔离 cache 是这个问题的唯一直接解**，比 chain pin 更根本。Qwen-32K / DS-32K 等复用倒置 4–8x 的模型，所有用户都应该走 A 主菜。
 
 ### 辅菜规则（通常组合）
 
 | 主菜 | 辅菜组合 | 适用 |
 |---|---|---|
-| B | **B + C** | 单 user 长 chain（pin + 容量保障，如 Qwen-64K chipset2） |
-| B | **B + A** | 多 user 共享 chain（pin + 路由聚合，如 Qwen-32B-8K） |
+| A | **A + B** | 多租户 / 倒置 + 该 user 有 chain（路由隔离 + chain pin，如 Qwen-32K 大部分用户、DS-32K mdata） |
+| A | **A + D** | 多租户 / 倒置 + 该 user hit < 25%（路由隔离保护其他 user，业务侧改写作补充，如 Qwen-32K nebula） |
+| A | **A + C** | 多租户 / 倒置 + 该 user 无 chain 但 cache 压力大 |
+| B | **B + C** | 单租户长 chain（pin + 容量保障，如 Qwen-64K chipset2） |
+| B | **B + A** | 多租户 chain 主导（pin + 路由保护，如 Qwen-32B-8K 多数 user） |
 | C | **C + B** | 大模型 + 部分 user 有强 chain（容量扩张 + 轻 pin） |
-| A | **A + B** | 高 QPS + 短 chain（batch 聚合 + 短 chain pin） |
-| D | **D + 轻 B** | hit 低但 chain 仍有一点价值（业务侧主菜 + chain 兜底） |
+| C | **C + A** | 大模型 + 多租户（容量扩张 + 分区路由） |
+| D | **D + 轻 B** | 单租户 hit 低但 chain 仍有点价值 |
 
 ### 例外 / 边界
 

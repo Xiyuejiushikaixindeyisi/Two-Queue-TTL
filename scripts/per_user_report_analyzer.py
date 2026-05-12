@@ -277,14 +277,70 @@ def _make_reasons(
     return reasons
 
 
+def compute_model_context(user_reports: dict[str, dict]) -> dict:
+    """Per-model cross-user signals for the recommendation rules.
+
+    Used by compute_step3_recommendation to detect reuse inversion and
+    multi-tenant cache pressure scenarios that any single user's data
+    cannot reveal.
+    """
+    hit_rates = []
+    request_pcts = []
+    for r in user_reports.values():
+        h = (r.get("stats") or {}).get("ideal_hit_rate", 0.0)
+        hit_rates.append(h)
+    if not hit_rates:
+        return {
+            "n_users": 0, "is_multi_tenant": False,
+            "max_hit_rate": 0.0, "min_hit_rate": 0.0,
+            "reuse_inversion_ratio": 1.0, "reuse_inversion": False,
+        }
+    max_h = max(hit_rates)
+    min_h = min(hit_rates)
+    # Inversion definition: max ≥ 2× min, where min == 0 (a user with no
+    # cache reuse at all) is treated as an extreme inversion case (ratio
+    # reported as a large sentinel value, inversion = True if max > 0).
+    if min_h > 0:
+        ratio = max_h / min_h
+        inversion = ratio >= 2.0
+    elif max_h > 0:
+        # One user has hit_rate 0 while another has >0 → extreme inversion
+        ratio = float("inf")
+        inversion = True
+    else:
+        ratio = 1.0
+        inversion = False
+    n_users = len(user_reports)
+    return {
+        "n_users": n_users,
+        # Multi-tenant when ≥3 users share the model (1-2 users still has
+        # cross-user driver but doesn't justify a router layer)
+        "is_multi_tenant": n_users >= 3,
+        "max_hit_rate": round(max_h, 4),
+        "min_hit_rate": round(min_h, 4),
+        # Reuse inversion: max/min hit_rate ratio ≥ 2.0 indicates that
+        # some users have radically different cache behavior from others,
+        # which means shared LRU will let the low-reuse users evict the
+        # high-reuse users' chains. Per-user routing fixes this.
+        "reuse_inversion_ratio": (
+            round(ratio, 2) if ratio != float("inf") else "inf (min hit_rate = 0)"
+        ),
+        "reuse_inversion": inversion,
+    }
+
+
 def compute_step3_recommendation(
     report_stats: dict, chains: list[dict], inter_arrival: dict,
-    new_per_sec_q: dict,
+    new_per_sec_q: dict, model_context: dict | None = None,
 ) -> dict:
     """Decide primary + companion algorithm per decision matrix §3 rules.
 
     Inputs are subsets of the user_report fields. Output is a dict written
     to user_report.json as a top-level field, and rendered as §6 in HTML.
+
+    `model_context` carries cross-user signals (reuse inversion, multi-tenant
+    flag, hit-rate distribution); when None, the function falls back to
+    single-user mode (no A-primary inversion path available).
 
     See docs/step3_algorithm_decision_matrix.md for the underlying rules.
     """
@@ -299,40 +355,73 @@ def compute_step3_recommendation(
 
     business_type, evidence = _infer_business_type(chains)
 
-    # Decision rules per matrix §3 + §6
+    ctx = model_context or {}
+    is_multi = ctx.get("is_multi_tenant", False)
+    has_inversion = ctx.get("reuse_inversion", False)
+    inversion_ratio = ctx.get("reuse_inversion_ratio")
+    n_users_ctx = ctx.get("n_users", 1)
+
+    # Decision rules per matrix §3 (revised 2026-05-12 to recognize A's
+    # core value in reuse-inversion / multi-tenant cache isolation).
     primary, companion = None, None
 
-    # D-first: hit rate too low + chain pin ROI minimal
-    pin_uplift_pp = (top_cov_pct / 100.0) * (1.0 - hit_rate) * 100.0  # rough pp gain
-    if hit_rate < 0.25 and pin_uplift_pp < 5.0:
+    pin_uplift_pp = (top_cov_pct / 100.0) * (1.0 - hit_rate) * 100.0
+    business_ceiling_low = hit_rate < 0.25 and pin_uplift_pp < 5.0
+
+    if is_multi and has_inversion:
+        # A-priority (highest in multi-tenant reuse-inversion).
+        # Per-user cache partition prevents low-reuse users from evicting
+        # the high-reuse users' chains — even if this user's own hit rate
+        # is poor (D would apply otherwise), routing isolation still
+        # protects the rest of the tenants.
+        primary = "A"
+        if business_ceiling_low:
+            # Low-hit user in inversion scenario: route to isolate, then
+            # bring in business-side rewrite as a secondary lever.
+            companion = "D"
+        elif n_chains > 0:
+            companion = "B"
+        elif unique >= 200_000:
+            companion = "C"
+    elif business_ceiling_low:
+        # D-priority (single-tenant or non-inversion multi-tenant low hit)
         primary = "D"
         if n_chains > 0:
-            companion = "B"   # 轻 B (pin 仍可救一点点)
-    # C-priority: large model + huge WS + long-doc reuse signature
+            companion = "B"   # light pin still rescues a tiny bit
     elif unique >= 1_000_000 and hit_rate >= 0.7:
+        # C-priority: extreme cache pressure + already-high reuse
         primary = "C"
         if top_len >= 100:
             companion = "B"
-    # A-priority: high throughput + multi-tenant signal
-    elif new_p95 >= 500 and total_reqs >= 10_000:
+        elif is_multi:
+            companion = "A"
+    elif is_multi and (unique >= 200_000 or new_p95 >= 200):
+        # A-priority case 2: multi-tenant + moderate cache pressure.
+        # Even without reuse inversion, cross-user driver in a shared
+        # cache hurts everyone; per-user routing + capacity helps.
         primary = "A"
-        if n_chains > 0:
-            companion = "B"
-    # B default: chain dominates the business
-    elif n_chains > 0:
-        primary = "B"
         if unique >= 200_000:
             companion = "C"
+        elif n_chains > 0:
+            companion = "B"
+    elif n_chains > 0:
+        # B default: chain dominates the user's business
+        primary = "B"
+        if is_multi:
+            companion = "A"     # multi-tenant: pair pin with routing isolation
+        elif unique >= 200_000:
+            companion = "C"     # single-tenant but capacity matters
     else:
-        # No chains and not enough signal to recommend
+        # No chain forest detected
         primary = "D"
-        companion = None
+        if is_multi:
+            companion = "A"
 
-    # Difficulty per algorithm and context
+    # Difficulty per algorithm
     difficulty_map = {
         "A": "high",       # routing layer requires infra changes
         "B": "low",        # vLLM-level chain pin is a known feature
-        "C": "medium",     # capacity expansion is cheap; pooling/quantization harder
+        "C": "medium",     # capacity expansion cheap; pooling/quantization harder
         "D": "high",       # business coordination required
     }
     difficulty = difficulty_map.get(primary, "unknown")
@@ -344,13 +433,26 @@ def compute_step3_recommendation(
         hit_rate, n_chains, top_cov_pct, top_len, unique, new_p95,
         business_type,
     )
+    # Extra cross-user reasons when model context triggered A
+    if primary == "A":
+        if has_inversion:
+            reasons.append(
+                f"模型级复用倒置: hit_rate max/min = {inversion_ratio}x "
+                f"(≥ 2.0 触发 A 路由，按 user 隔离 cache 防止驱逐)"
+            )
+        elif is_multi:
+            reasons.append(
+                f"多租户场景 ({n_users_ctx} users) + cache 压力 → 路由分区减少 "
+                f"cross-user 驱逐"
+            )
 
     # Implementation steps per primary algorithm
     impl_map = {
         "A": [
-            "在 router 层加 prefix-aware batching (短期可用 vLLM 内置 prefix matching)",
-            "把同 system-prompt 的 request 路由到同实例 (避免 cross-user cache 驱逐)",
-            "Step 2 验证 batch 内 cache 命中行为 (Qwen-32B-8K reuse p50=0s 之谜)",
+            "按 user_id 隔离 cache（multi-tenant cache partition），防止重度/低复用用户驱逐其他 user 的 chain",
+            "高优先级用户路由到独立实例 / 独立 cache 池（特别是复用倒置场景的高 hit 用户）",
+            "同 system_prompt 的 request 路由到同实例（prefix-aware batching）",
+            "Step 2 验证：测真实 cache 容量在 user 隔离下能否容纳全部 user chain；同 batch 内 cache 命中行为",
         ],
         "B": [
             f"识别并 pin top {n_chains} 条 chain (dominant chain {top_len} block / cov {top_cov_pct:.1f}%)",
@@ -362,6 +464,7 @@ def compute_step3_recommendation(
             f"评估 cache 容量是否能 hold {unique:,} unique blocks",
             "容量不足时考虑: 物理扩容 / KV 量化 (fp8 或 int8) / 跨实例池化",
             "重要 chain 配合 B 算法做选择性 pin",
+            "多租户场景下与 A 配合：先按 user 分区，再各分区内 LRU + 量化",
         ],
         "D": [
             "与业务方沟通: 减少 prompt 中的动态字段 (request_id / timestamp / 随机 seed)",
@@ -380,6 +483,12 @@ def compute_step3_recommendation(
         "difficulty":         difficulty,
         "estimated_uplift":   estimated,
         "implementation_steps": implementation,
+        "model_context_snapshot": {
+            "n_users":          n_users_ctx,
+            "is_multi_tenant":  is_multi,
+            "reuse_inversion":  has_inversion,
+            "reuse_inversion_ratio": inversion_ratio,
+        } if model_context else None,
         "_note": "see docs/step3_algorithm_decision_matrix.md for the full rule set",
     }
 
@@ -603,14 +712,10 @@ def analyze_user(
         ],
     }
 
-    # Step 3 algorithm recommendation (decision matrix §3 rules)
-    user_report["step3_recommendation"] = compute_step3_recommendation(
-        user_report["stats"],
-        forest["chains"],
-        user_report["inter_arrival_gaps_seconds"],
-        user_report["new_unique_blocks_per_sec_q"],
-    )
-
+    # Step 3 recommendation is computed in a 2nd pass by main(), after
+    # all selected users are analyzed — it needs model-level context
+    # (reuse inversion, multi-tenant signals) that single-user analysis
+    # cannot produce.
     return user_report, forest, root
 
 
@@ -750,7 +855,9 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     user_reports: dict[str, dict] = {}
+    user_forests: dict[str, dict] = {}    # kept in memory for pass-2 recommendation
 
+    # ---- Pass 1: analyze each user, write chain_forest.json now ----
     for uid in selected:
         print(f"\nAnalyzing {uid} ({counts[uid]:,} requests)...", flush=True)
         report, forest, _root = analyze_user(uid, records_by_user[uid], args)
@@ -758,12 +865,12 @@ def main() -> None:
         udir = args.output_dir / safe_dirname(uid)
         udir.mkdir(parents=True, exist_ok=True)
 
-        with open(udir / "user_report.json", "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
         with open(udir / "chain_forest.json", "w", encoding="utf-8") as f:
             json.dump(forest, f, indent=2, ensure_ascii=False)
 
         user_reports[uid] = report
+        user_forests[uid] = forest
+
         s = report["stats"]
         cs = report["chain_forest_summary"]
         print(
@@ -774,6 +881,33 @@ def main() -> None:
             f"({s['analyze_seconds']:.1f}s)",
             flush=True,
         )
+
+    # ---- Pass 2: compute model-level context, then per-user Step 3 recommendation ----
+    model_context = compute_model_context(user_reports)
+    print(
+        f"\nModel context: n_users={model_context['n_users']}, "
+        f"multi_tenant={model_context['is_multi_tenant']}, "
+        f"hit_rate range = [{model_context['min_hit_rate']:.3f}, "
+        f"{model_context['max_hit_rate']:.3f}]  "
+        f"(reuse inversion ratio = {model_context['reuse_inversion_ratio']}, "
+        f"triggered = {model_context['reuse_inversion']})",
+        flush=True,
+    )
+
+    for uid in selected:
+        report = user_reports[uid]
+        forest = user_forests[uid]
+        report["step3_recommendation"] = compute_step3_recommendation(
+            report["stats"],
+            forest["chains"],
+            report["inter_arrival_gaps_seconds"],
+            report["new_unique_blocks_per_sec_q"],
+            model_context=model_context,
+        )
+        # Now write user_report.json (with recommendation)
+        udir = args.output_dir / safe_dirname(uid)
+        with open(udir / "user_report.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
 
     write_summary(args.output_dir, selected, excluded, user_reports, total, len(counts))
     print(f"\n  output → {args.output_dir}/user_summary.{{json,csv}}", flush=True)
