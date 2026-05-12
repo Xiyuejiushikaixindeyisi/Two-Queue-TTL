@@ -303,6 +303,35 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
 
 `coverage_count` 仍然指 leaf count（未改语义，保持向后兼容）。
 
+**v3 新增字段（2026-05-12）—— prefix shadow detection**：
+
+`chain_forest.json` 顶层加 `semantic_prefix_overlap` 字段，用于检测 §3.6 的 prefix-shadow 现象——chain 之间在 trie 上 branch_pos=0（root 即分叉）但 raw_prompt 字节级前缀实际相同：
+
+```json
+{
+  "semantic_prefix_overlap": {
+    "block_size": 128,
+    "shadow_min_bytes": 64,
+    "unit": "bytes",
+    "matrix": [
+      [null, 98, 98, 0],
+      [98, null, 98, 0],
+      [98, 98, null, 0],
+      [0, 0, 0, null]
+    ],
+    "shadow_groups": [[0, 1, 2]]
+  }
+}
+```
+
+- `matrix[i][j]` = chain i 和 chain j 的 **byte-level LCP**（取 raw_prompt 切到 chain max(length_i, length_j) × block_size byte 上限内的最长公共前缀），对角线为 `null`
+- `shadow_groups` = 通过 union-find 聚合（任何对 LCP ≥ `shadow_min_bytes` 都视为同组）
+- CLI 参数 `--shadow-min-bytes`（default 64，约半个 default block）控制阈值
+
+**关键实现细节**：算法直接读 raw_prompt 而非 `decoded_text`，原因是 utf-8 `errors='replace'` round-trip 失真（单字节 invalid byte → \\ufffd → 3 byte），会让 byte-LCP 全错。raw_prompt 来自 CSV 的 utf-8 字符串，encode 回 utf-8 byte 是稳定的。
+
+**Step 3 算法义务**：决策 pin 时不能盲信 `branch_at_root_position=0`——必须查 `semantic_prefix_overlap.shadow_groups`，把同组 chain 视为"共享一个前缀 unit"，按合并后 cov 算 ROI。HTML 在 §5 chain forest 顶部和每个 chain card 都显示 shadow group 信息（紫色标注），人工 inspect 时一眼可见。
+
 ---
 
 ## 6. 工程拆解

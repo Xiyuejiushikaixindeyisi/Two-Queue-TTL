@@ -169,6 +169,79 @@ def lcp_histogram(lcps: list[int]) -> tuple[list[dict], dict]:
     return histogram, quantiles
 
 
+def _byte_level_lcp(
+    chain_a_sample_rid: str | None,
+    chain_b_sample_rid: str | None,
+    prompts_by_rid: dict[str, str],
+    block_size: int,
+    max_blocks: int,
+) -> int:
+    """Byte-level LCP between two chains' raw prompt content.
+
+    Addresses §3.6: when shared semantic prefix is split mid-block by
+    block_size chunking, trie reports branch_pos=0 even though the
+    chains share many leading bytes. We bypass the trie by going back
+    to raw_prompt and computing a true byte-level LCP, capped to
+    max_blocks × block_size so we don't compare beyond the chains.
+
+    Uses raw_prompt directly (not decoded_text) to avoid the
+    utf-8 replacement-char round-trip distortion: a single invalid
+    byte in the original becomes \\xef\\xbf\\xbd (3 bytes) after
+    decode-then-encode, which would shift all subsequent byte
+    positions and break the LCP comparison.
+
+    Returns LCP in bytes.
+    """
+    if not chain_a_sample_rid or not chain_b_sample_rid:
+        return 0
+    prompt_a = prompts_by_rid.get(chain_a_sample_rid)
+    prompt_b = prompts_by_rid.get(chain_b_sample_rid)
+    if not prompt_a or not prompt_b:
+        return 0
+    cap = max_blocks * block_size
+    # iter_raw_records returns prompts as str; encode back to bytes. CSV
+    # round-trip preserves the original utf-8 representation.
+    bytes_a = prompt_a.encode("utf-8", errors="replace")[:cap]
+    bytes_b = prompt_b.encode("utf-8", errors="replace")[:cap]
+    n = min(len(bytes_a), len(bytes_b))
+    lcp = 0
+    for k in range(n):
+        if bytes_a[k] != bytes_b[k]:
+            break
+        lcp = k + 1
+    return lcp
+
+
+def compute_shadow_groups(
+    overlap_matrix: list[list[int | None]], threshold: int,
+) -> list[list[int]]:
+    """Group chain indices whose pairwise LCP >= threshold via union-find."""
+    n = len(overlap_matrix)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            v = overlap_matrix[i][j]
+            if v is not None and v >= threshold:
+                union(i, j)
+
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        groups[find(i)].append(i)
+    return [sorted(g) for g in groups.values() if len(g) > 1]
+
+
 def walk_chain_leaf(root: TrieNode, hex_keys: list[str]) -> TrieNode:
     """Walk trie along chain keys to find the leaf node. Returns None if path missing."""
     node = root
@@ -335,6 +408,39 @@ def analyze_user(
     forest["params"]["block_size"] = args.block_size
     forest["stats"]["forest_seconds"] = round(forest_seconds, 3)
 
+    # §3.6 prefix-shadow detection: pairwise BYTE-level LCP + union-find.
+    # branch_at_root_position alone is misleading when block_size chunking
+    # cuts a shared semantic prefix mid-block. Going back to raw_prompt
+    # bytes (via sample_request_id) lets us find shared prefixes that fall
+    # within a single block. The matrix entries are byte counts.
+    n_chains = len(forest["chains"])
+    overlap_matrix: list[list[int | None]] = [
+        [None if i == j else 0 for j in range(n_chains)] for i in range(n_chains)
+    ]
+    for i in range(n_chains):
+        max_blocks_i = forest["chains"][i]["chain_length"]
+        for j in range(i + 1, n_chains):
+            max_blocks_j = forest["chains"][j]["chain_length"]
+            lcp_bytes = _byte_level_lcp(
+                forest["chains"][i].get("sample_request_id"),
+                forest["chains"][j].get("sample_request_id"),
+                prompts_by_rid,
+                args.block_size,
+                max(max_blocks_i, max_blocks_j),
+            )
+            overlap_matrix[i][j] = lcp_bytes
+            overlap_matrix[j][i] = lcp_bytes
+
+    shadow_groups = compute_shadow_groups(overlap_matrix, args.shadow_min_bytes)
+    forest["semantic_prefix_overlap"] = {
+        "block_size":         args.block_size,
+        "shadow_min_bytes":   args.shadow_min_bytes,
+        "matrix":             overlap_matrix,
+        "shadow_groups":      shadow_groups,
+        "unit":               "bytes",
+    }
+    forest["params"]["shadow_min_bytes"] = args.shadow_min_bytes
+
     ideal_hit_rate = hit_blocks / total_blocks if total_blocks else 0.0
 
     # Top-chain summary for user_summary
@@ -477,6 +583,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mc-min-chain-length",   type=int,   default=DEFAULT_MIN_CHAIN_LENGTH)
     p.add_argument("--mc-min-chain-coverage", type=float, default=DEFAULT_MIN_CHAIN_COVERAGE)
     p.add_argument("--mc-max-chains",         type=int,   default=DEFAULT_MAX_CHAINS)
+    p.add_argument("--shadow-min-bytes",      type=int,   default=64,
+                   help="Min byte-identical leading bytes (raw_prompt) for two "
+                        "chains to be grouped as a shadow set (§3.6). default "
+                        "64 (≈ half a default block); the threshold catches "
+                        "shadows that block-size chunking hides")
     return p.parse_args()
 
 

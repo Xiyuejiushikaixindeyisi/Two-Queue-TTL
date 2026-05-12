@@ -477,6 +477,10 @@ DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-
 
 **Step 3 算法义务**：决策时不能盲信 `branch_at_root_position`——必须对 chain 之间 decoded content 头部做语义对比。或在 `multi_chain_finder` v3 阶段引入"semantic prefix overlap detection"作为可选 post-processing。
 
+**v3 已实施（2026-05-12）**：`per_user_report_analyzer.py` 在解码 chain forest 后自动跑 **byte-level LCP** (raw_prompt 字节流)的 pairwise 计算 + union-find shadow grouping。`chain_forest.json` 顶层新增 `semantic_prefix_overlap` 字段（含 N×N byte LCP 矩阵 + shadow_groups 列表）；CLI 参数 `--shadow-min-bytes`（default 64）控制阈值。HTML 报告在 §5 顶部显示 shadow group 总览（紫色标注），每个 chain card 在 header 标注所属 group。算法直接读 raw_prompt（不用 decoded_text）以避免 utf-8 replace 字符 round-trip 失真。详见 [`per_user_research_design.md` §5.5](per_user_research_design.md)。
+
+实施位置说明：v3 加在 **orchestrator (`per_user_report_analyzer.py`)** 而非 finder 中——因为 shadow detection 需要 raw_prompt bytes 比较，是 finder 解码后的后处理；保持 finder（纯 trie 算法）单一职责。
+
 ### 3.7 multi_chain_finder 的 leaf-only 局限（2026-05-12 实测发现）
 
 实测发现 chipset2 (Qwen-64K) 的 hit rate **92.3%** 远高于 chain leaf coverage 累计 **41.9%**（7 条 chain 的 cov 加起来 = 8.39 + 6 × 5.59）。差值 50+ 个百分点来自 **chain prefix 上的非 leaf 命中**：
