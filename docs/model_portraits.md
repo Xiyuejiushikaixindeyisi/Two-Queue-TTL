@@ -100,6 +100,20 @@ Top-3 用户的 chain forest 实测后，"单租户长文档/skills" 框架不�
 **总结**
 Qwen-8B-8K 理想 KV cache 命中率只有 18.05%，这说明哪怕 cache 无限大也只有约 18% 的 block 能够复用——prefix cache 的**业务上限低**。且 Qwen-8B-8K 的主要任务是"总结概括"，prompt 中以用户历史请求/LLM 历史回复为主，也无法通过 prompt 改写提升 KV cache 命中率。
 
+**2026-05-12 实测修订**
+
+requests 28,663；total blocks 1,375,049；unique blocks 1,147,559（**unique/total = 83.5%**，几乎每个 block 都是新的）；avg ≈ 48 block / req（~6 KB / req）。chain 数量：1 条，长度 14 block，cov 5.89%。
+
+chain 0 decoded content：
+
+> 你是一个专业的邮件分类助手 需根据主题和正文将邮件精准归类至以下 9 类： 1. 投诉类 2. 决策类 3. 审批类 4. 进度类 5. 纪要类 6. 提醒类 7. 求助类 8. 报告类 9. 其他类
+
+**❗业务推断修正**：原推断"目的是对用户或助手的提问/回答进行语言改写，最终输出 100 字内的总结"**完全错误**。实际是**邮件分类**（single-label classification，输出 9 类标签之一），不是文本总结。这是 portraits 唯一一处**业务方向判错**的章节——之前因为 hit_rate 数字命中（18.05%）就标了"完全确认"，没看 decoded content 验证业务。**教训：仅看数字不看 chain 内容会漏掉业务画像错误**。
+
+**✓ 确认原推断方向**：业务上限低（hit_rate 16.54% 实测 vs 18.05% 历史）的**根因仍然是邮件内容天然多样**——每封邮件独立，几乎无跨请求复用。"prefix cache 业务上限低"作为结论仍然成立，但原因从"语言改写"改为"邮件分类的输入天然多样"。
+
+**＋ Step 3 启示**：Qwen-8B-8K 不在 chain 优化的 ROI 区间。即使 pin 14 block 也只覆盖 5.89% 流量，对 16.54% 全局 hit rate 的贡献几乎可忽略。**Step 3 应放弃此模型的 prefix cache 优化方向**，转而聚焦减小邮件分类任务本身的 prefill 时间（与 cache 无关的优化）。
+
 ---
 
 ### 1.3 Qwen-V3-32B-8K — 高并发多租户批处理流
@@ -129,6 +143,28 @@ Qwen-8K 是业务体量最大的模型。reuse_time=0s 一方面说明存在高�
 **＋新发现：dom_cov 与流量反向相关**（流量小 → 单条 chain 覆盖率高）——重度用户业务多样、单条 chain 占比低；轻度用户业务单一、单条 chain 主导。
 
 **✓ 确认**：reuse p50=0s 数据精度问题保留，Step 2 实测前无法分辨"真复用" vs "batch 内"。
+
+**＋chain forest decoded 揭示业务画像（2026-05-12 补加）**：
+
+| 用户 | chain decoded 关键内容 | 业务推断 |
+|---|---|---|
+| nebula.venussearch（**终端 AI**） | chain 0（23 block, cov 25%）"搜索语句生成助手 ... 生成几个精准的搜索语句" + chain 1（10 block, cov 12%）"信息筛选专家 ... 从搜索结果中挑选出与用户问题相关的文档" | **RAG pipeline 两阶段**：query 改写 → 文档相关性筛选 |
+| S773（员工助手） | chain 0（34 block, cov 41.5%）+ chain 1（14 block, cov 37.3%） | 用户标注："**虽然 branch_pos=0 但实际上 chain 1 和 chain 0 的前 14 个 block 几乎完全相同**" |
+| quality_public_sentiment（**工单分析**） | chain 0（14 block, cov 61.79%）"语言分析专家 ... 总结出一个 10 个字以内的共性问题" + chain 1（17 block, cov 7.3%）"语言理解专家和工单分析人员" | **工单分析两阶段**：共性提取 → 详细分析 |
+
+**❗修正**：原推断"高并发多租户批处理流"过于笼统——实际是**三种独立 RAG / 分类任务**（终端 AI 的 RAG / 员工助手 / 工单分析），共用 Qwen-32B-8K 服务但业务无关。
+
+**＋ §3.6 prefix shadow 实测确认**：S773 和 quality_public_sentiment 都出现"chain 之间 decoded 前 N block 几乎相同但 branch_pos=0"。S773 用户标注尤其精确——"前 14 block 几乎完全相同"。这是 portraits §3.6 提出的"block_size=128 切块边界打破语义共享前缀"现象的**实测确认**（之前 DS-8K 是推测）。
+
+**＋ Pin ROI（含 §3.6 shadow 修正）**：
+
+| 用户 | pin 方案 | 容量 | cov | 备注 |
+|---|---|---|---|---|
+| nebula.venussearch | chain 0+1 全 pin | 33 block | 36.85% | 两阶段 RAG 各 pin 一段 |
+| S773 | 共享 14 block（shadow 修正）+ chain 0 后 20 block | **34 block** | **78.75%** | §3.6 shadow 让真实 cov 翻倍 |
+| quality_public_sentiment | 仅 pin chain 0 | **14 block** | **61.79%** | **Qwen-32B-8K 全局最高单 pin ROI**（0.23 block / % cov） |
+
+三用户合计 pin ≈ 81 block 覆盖 60%+ 各自用户流量。如果 cache 做 per-user 分区，每个 user 几十 block pin 即可——这是**极低成本极高 ROI 的画像**，与 portraits 之前判定的"待 batch 精度补证"完全不同方向。
 
 ---
 
