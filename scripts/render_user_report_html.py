@@ -293,6 +293,13 @@ def render_chain_card(chain: dict, top_cov: float) -> str:
         if bp is not None else "no divergence from any sibling"
     )
 
+    # v2 prefix coverage signal (portraits §3.7): show max prefix cov next to
+    # leaf cov so chipset2-like asymmetry (max >> leaf) is immediately visible.
+    max_pre = chain.get("max_prefix_coverage_pct")
+    pre_str = (
+        f"max_prefix_cov={max_pre:.2f}%" if max_pre is not None else ""
+    )
+
     concat_text = "".join(
         (b.get("decoded_text") or "") for b in chain.get("decoded_content", [])
     )
@@ -305,7 +312,8 @@ def render_chain_card(chain: dict, top_cov: float) -> str:
   <div class="chain-header">
     <span class="id">chain #{chain['chain_id']}</span>
     <span>length={chain['chain_length']} blocks</span>
-    <span class="cov">coverage={chain['coverage_count']:,} ({chain['coverage_pct']:.2f}%)</span>
+    <span class="cov">leaf_cov={chain['coverage_count']:,} ({chain['coverage_pct']:.2f}%)</span>
+    <span>{html.escape(pre_str)}</span>
     <span>{html.escape(branch_str)}</span>
     <span>sample_request={html.escape(chain.get('sample_request_id') or '-')}</span>
   </div>

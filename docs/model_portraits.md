@@ -375,6 +375,8 @@ DS-8K S773 的 3 条 chain 都以 `{"model": "DeepSeek-V3.1-Terminus-NoThinking-
 
 **这是 `multi_chain_finder` 的 v2 改进项**，目前不阻塞 Step 1.5 / Step 2 推进，但 Step 3 设计阶段必须解决。
 
+**v2 已实施（2026-05-12）**：选择上面的方案 1。`chain_forest.json` 的每条 chain 现在带 `coverage_pcts: list[float]`（chain 上每 position 的覆盖率）+ `max_prefix_coverage_pct`（便利字段，= `coverage_pcts[0]`）。HTML chain card 在 leaf cov 旁边显示 `max_prefix_cov`，chipset2-like 现象（max prefix >> leaf）一眼可见。`coverage_count` / `coverage_pct` 字段语义不变（仍指 leaf），向后兼容。详见 [`per_user_research_design.md` §5.5](per_user_research_design.md)。
+
 ---
 
 ## 4. Open Questions

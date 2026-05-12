@@ -195,11 +195,17 @@ def find_chain_forest(
     chains_out = []
     for i, c in enumerate(pruned):
         bp = c["first_branch_position"]
+        # Prefix coverage (counts on the trie are monotonically non-increasing
+        # along the chain, so coverage_pcts is non-increasing too). Exposes the
+        # signal hidden by leaf-only output — see portraits §3.7 / design §5.5.
+        coverage_pcts = [round(cnt / total * 100, 3) for cnt in c["counts"]]
         chains_out.append({
             "chain_id":      i,
             "chain_length":  len(c["keys"]),
             "coverage_count": c["counts"][-1],
             "coverage_pct":  round(c["counts"][-1] / total * 100, 3),
+            "max_prefix_coverage_pct": coverage_pcts[0],
+            "coverage_pcts": coverage_pcts,
             "branch_at_root_position": bp,
             "branch_at_root_ratio":
                 _branch_ratio(c["counts"], bp, total) if bp is not None else None,

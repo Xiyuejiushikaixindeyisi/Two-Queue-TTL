@@ -264,8 +264,10 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
       "chain_length": 56,
       "coverage_count": 2278,
       "coverage_pct": 42.0,
+      "max_prefix_coverage_pct": 80.0,
+      "coverage_pcts": [80.0, 80.0, 75.5, 60.1, 42.0, ..., 42.0],
       "branch_at_root_position": 0,
-      "branch_at_root_ratio": 0.42,
+      "branch_at_root_ratio": 0.80,
       "decoded_content": [
         {"position": 0, "prefix_path_key": "...", "count": 5421, "decoded_text": "..."},
         ...
@@ -276,8 +278,10 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
       "chain_length": 47,
       "coverage_count": 943,
       "coverage_pct": 17.4,
+      "max_prefix_coverage_pct": 23.5,
+      "coverage_pcts": [23.5, ..., 17.4],
       "branch_at_root_position": 0,
-      "branch_at_root_ratio": 0.17,
+      "branch_at_root_ratio": 0.24,
       ...
     },
     ...
@@ -286,6 +290,18 @@ def multi_chain(node, mc_branch_thr, mc_cov_thr,
 ```
 
 `branch_at_root_position` + `branch_at_root_ratio` 帮助回答"chain 1 和 chain 2 在 trie 上是从第几个 block 起分叉的"——对应"system prompt 是否共享前缀片段"。
+
+**v2 新增字段（2026-05-12）—— prefix coverage**：
+
+`coverage_pcts[]` 给出 chain 上**每个 position** 的覆盖率（counts[i] / total × 100）。由于 trie 节点 count 沿 chain 单调非增，`coverage_pcts` 同样单调非增。
+
+- `max_prefix_coverage_pct = coverage_pcts[0]` —— chain 第一个 block 的覆盖率（即 chain root 处最高 cov）
+- `coverage_pct = coverage_pcts[-1]` —— chain leaf 处覆盖率（原字段，向后兼容）
+- `max_prefix - leaf` 揭示 chain 在 trie 上的**衰减幅度**：差值越大，说明这条 chain 内部分叉越多，能 pin 的"高 cov 前缀段"越短
+
+这是 portraits §3.7 提出的局限的修复——解决 chipset2 这种 "leaf cov 5–8% 但 max prefix cov >> leaf" 的现象，让 Step 3 算法能选择 pin 到 prefix 上 cov 衰减前的最佳位置。
+
+`coverage_count` 仍然指 leaf count（未改语义，保持向后兼容）。
 
 ---
 
