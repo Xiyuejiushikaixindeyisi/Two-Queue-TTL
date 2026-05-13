@@ -556,27 +556,47 @@ is_anomaly = (user.chain_len_band == "long"
 
 HTML 验证：§0 模型层指标 + §0.1 流量突变 + §1.5 分类标签 + §6 子类型 badge 全部正确渲染；3 个 missing-field 警告（params_class / instance_count / cache_capacity_blocks）+ 1 anomaly-warning（heavy_low_hit）+ 1 tbd-note（B(2) 公式 TBD）全部触发。
 
-**7 模型实测**：本地生产数据 gitignored，待用户在生产环境跑：
+**7 模型实测**：本地生产数据 gitignored，待用户在生产环境跑。一键 pipeline 已落地为 `scripts/v2_run_pipeline.py`：
 
 ```bash
-for model in qwen_v3_32b_8k qwen_v3_32b_32k qwen_v3.5_27b_64k \
-             qwen_v3.5_27b_128k deepseek_v3.1_8k deepseek_v3.1_32k glm_v5.1; do
-  python3 scripts/per_user_report_analyzer.py \
-    --raw-csv  data/${model}/raw \
-    --output-dir outputs/${model}/per_user_reports
-  python3 scripts/render_user_report_html.py \
-    --input-dir outputs/${model}/per_user_reports
-  # 然后人工补 model_report.json 的 model_params_class / instance_count /
-  # cache_capacity_blocks，重新渲染 HTML
-done
+# 一次性跑 7 模型 analyzer + renderer + cross-model summary
+python3 scripts/v2_run_pipeline.py
+
+# 默认 8 个模型（model_short 必须匹配 data/<name>/raw/ 实际目录名）：
+#   qwen_v3_8b_8k / qwen_v3_32b_8k / qwen_v3_32b_32k /
+#   qwen_v3.5_27b_64k / qwen_v3.5_27b_128k /
+#   deepseek_v3.1_8k / deepseek_v3.1_32k / glm_v5.1
+#
+# 生产真实目录如果用日期命名（dsk8k_24h_0506 等）, 用 --models 覆盖：
+python3 scripts/v2_run_pipeline.py \
+    --models dsk8k_24h_0506,dsk8k_24h_0507,qwen64k_24h_0506,...
+
+# 仅汇总（不重跑 analyzer / renderer）：
+python3 scripts/v2_run_pipeline.py --skip-analyzer --skip-renderer
+
+# 调阈值（forwarded to analyzer）：
+python3 scripts/v2_run_pipeline.py --analyzer-extra='--spike-threshold 3.0'
 ```
 
-跑完后将归类结果与 §9.2.5 对照，**预期偏差**：
-1. Qwen-32K S773 (流量 11.3%, hit 0.07) — §9.2.5 标"A(1) 边界"，实际触发依赖 unique_share 是否 ≥ 30%；若 unique_share < 30% 会落 A0 + D
+**输出**：
+- `outputs/<model>/per_user_reports/`（per-model：user_report.json + chain_forest.json + user_report.html + model_report.json）
+- `outputs/v2_summary.csv` —— 全部 user × 全部模型，每行含 hit / share / chain / bands / 3 个 subtype / is_anomaly
+- `outputs/v2_summary.md` —— 按模型分组的对照表 + 跨模型子类型分布 + 反常 user 表 + 人工补字段缺失情况
+
+**手动补字段流程**：
+1. Pipeline 跑完后看 `v2_summary.md` 的「人工补字段缺失情况」表
+2. 对每个 model 编辑 `outputs/<model>/per_user_reports/model_report.json`，补 `model_params_class`（`small_le_32B` 或 `large_200B_moe`）、`instance_count`、`cache_capacity_blocks`
+3. 重跑 renderer（不需要 analyzer，因为 model_report.json 已存在）：
+   ```bash
+   python3 scripts/v2_run_pipeline.py --skip-analyzer
+   ```
+
+**对照 §9.2.5 检查归一致性。预期偏差点**：
+1. Qwen-32K S773（流量 11.3%, hit 0.07）— §9.2.5 标"A(1) 边界"，实际触发依赖 unique_share 是否 ≥ 30%；若 unique_share < 30% 会落 A0 + D
 2. Qwen-8B-8K S773 — chain ratio 待 avg_blocks_per_request 实测才能确定 long/short；§9.2.5 暂标"待 chain_ratio 实测"
 3. 单 chain 高 cov 但 unique_share 中等的 user（如 Qwen-64K supply/chipset2）— A(2) 触发需要 chain_count ≥ 3 + unique_share ≥ 30%，supply/chipset2 总流量 3% + 1.6% unique_share 可能不到 30%，会落 A0
 
-实测结果与上述偏差一致 → 规则正确；不一致 → 排查阈值或规则错误。
+实测结果与上述偏差一致 → 规则正确；不一致 → 排查阈值或规则错误，编辑 §9.2.8 续写实际偏差日志。
 
 ---
 
