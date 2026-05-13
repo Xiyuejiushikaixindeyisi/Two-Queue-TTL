@@ -67,18 +67,72 @@ csv.field_size_limit(sys.maxsize)
 DEFAULT_TOP_K = 3
 DEFAULT_MIN_REQUEST_PCT = 0.01
 
+# v2 classification thresholds — overridable via CLI flags
+DEFAULT_HIT_LOW = 0.30
+DEFAULT_HIT_HIGH = 0.60
+DEFAULT_COV_LOW = 0.10
+DEFAULT_COV_HIGH = 0.50
+DEFAULT_CHAIN_LEN_RATIO_LONG = 0.30
+DEFAULT_UNIQUE_SHARE_LOW = 0.05
+DEFAULT_UNIQUE_SHARE_HIGH = 0.30
+DEFAULT_CHAIN_COUNT_MANY = 3
+DEFAULT_SPIKE_WINDOW_MIN = 5
+DEFAULT_SPIKE_THRESHOLD = 5.0
+
 
 # ---------------------------------------------------------------------------
-# Pass 1: per-user request counts (no raw_prompt held in memory)
+# Pass 1: per-user request counts + req-per-5min bucket for spike detection
 # ---------------------------------------------------------------------------
 
-def collect_user_counts(csv_files: list[Path]) -> tuple[dict[str, int], int]:
+def collect_user_counts(
+    csv_files: list[Path], window_minutes: int = 5,
+) -> tuple[dict[str, int], int, dict[int, int]]:
+    """Single pass: counts requests per user AND per N-min bucket for spike detection.
+
+    Returns (per_user_counts, total_requests, req_per_window_bucket).
+    Bucket index = floor(timestamp_seconds / (window_minutes * 60)).
+    """
     counts: dict[str, int] = defaultdict(int)
+    req_per_window: dict[int, int] = defaultdict(int)
     total = 0
-    for _rid, user_id, _prompt, _ts in iter_raw_records(csv_files):
+    bucket_secs = window_minutes * 60
+    for _rid, user_id, _prompt, ts in iter_raw_records(csv_files):
         counts[user_id] += 1
+        try:
+            ts_int = int(float(ts))
+        except (ValueError, TypeError):
+            ts_int = 0
+        req_per_window[ts_int // bucket_secs] += 1
         total += 1
-    return dict(counts), total
+    return dict(counts), total, dict(req_per_window)
+
+
+def detect_traffic_spikes(
+    req_per_window: dict[int, int],
+    threshold_multiplier: float = 5.0,
+    window_minutes: int = 5,
+) -> list[dict]:
+    """Detect adjacent 5-min windows where req_count[i] >= req_count[i-1] * threshold.
+
+    Buckets are merged into contiguous spans (consecutive bucket indexes).
+    Returns list of spike events sorted by window_start_bucket.
+    """
+    if not req_per_window:
+        return []
+    sorted_buckets = sorted(req_per_window.items())
+    spikes: list[dict] = []
+    for i in range(1, len(sorted_buckets)):
+        prev_b, prev_n = sorted_buckets[i - 1]
+        cur_b, cur_n = sorted_buckets[i]
+        if prev_n > 0 and cur_n / prev_n >= threshold_multiplier:
+            spikes.append({
+                "window_start_bucket":  cur_b,
+                "window_start_seconds": cur_b * window_minutes * 60,
+                "prev_window_count":    prev_n,
+                "this_window_count":    cur_n,
+                "ratio_to_prev":        round(cur_n / prev_n, 2),
+            })
+    return spikes
 
 
 def select_users(
@@ -277,40 +331,87 @@ def _make_reasons(
     return reasons
 
 
-def compute_model_context(user_reports: dict[str, dict]) -> dict:
-    """Per-model cross-user signals for the recommendation rules.
+def compute_model_context(
+    user_reports: dict[str, dict],
+    traffic_spikes: list[dict] | None = None,
+    spike_config: dict | None = None,
+) -> dict:
+    """Per-model cross-user signals + v2 aggregate metrics.
 
-    Used by compute_step3_recommendation to detect reuse inversion and
-    multi-tenant cache pressure scenarios that any single user's data
-    cannot reveal.
+    Used by compute_step3_recommendation to detect reuse inversion,
+    multi-tenant cache pressure, spike events, and to expose the manual
+    fields (model_params_class / instance_count / cache_capacity_blocks)
+    needed for full decision matrix §9.2 evaluation.
     """
     hit_rates = []
-    request_pcts = []
     for r in user_reports.values():
         h = (r.get("stats") or {}).get("ideal_hit_rate", 0.0)
         hit_rates.append(h)
+
     if not hit_rates:
         return {
-            "n_users": 0, "is_multi_tenant": False,
-            "max_hit_rate": 0.0, "min_hit_rate": 0.0,
-            "reuse_inversion_ratio": 1.0, "reuse_inversion": False,
+            "n_users": 0,
+            "is_multi_tenant": False,
+            "max_hit_rate": 0.0,
+            "min_hit_rate": 0.0,
+            "reuse_inversion_ratio": 1.0,
+            "reuse_inversion": False,
+            "ideal_hit_rate_aggregate": 0.0,
+            "rpm_avg": 0.0,
+            "unique_rpm_avg": 0.0,
+            "total_unique_blocks_topk": 0,
+            "trace_duration_minutes": 0.0,
+            "traffic_spikes": traffic_spikes or [],
+            "spike_config": spike_config or {},
+            "model_params_class": None,
+            "instance_count": None,
+            "cache_capacity_blocks": None,
         }
+
     max_h = max(hit_rates)
     min_h = min(hit_rates)
-    # Inversion definition: max ≥ 2× min, where min == 0 (a user with no
-    # cache reuse at all) is treated as an extreme inversion case (ratio
-    # reported as a large sentinel value, inversion = True if max > 0).
     if min_h > 0:
         ratio = max_h / min_h
         inversion = ratio >= 2.0
     elif max_h > 0:
-        # One user has hit_rate 0 while another has >0 → extreme inversion
         ratio = float("inf")
         inversion = True
     else:
         ratio = 1.0
         inversion = False
     n_users = len(user_reports)
+
+    # v2 aggregate metrics
+    total_requests = sum((r.get("stats") or {}).get("total_requests", 0)
+                         for r in user_reports.values())
+    total_blocks = sum((r.get("stats") or {}).get("total_blocks", 0)
+                       for r in user_reports.values())
+    total_hit_blocks = sum((r.get("stats") or {}).get("hit_blocks", 0)
+                           for r in user_reports.values())
+    # Top-K sum is an upper bound — long-tail users not collected, so this
+    # over-counts overlap if any. Used as denominator for share_of_model_unique.
+    total_unique_topk = sum((r.get("stats") or {}).get("unique_blocks", 0)
+                            for r in user_reports.values())
+
+    ideal_hit_rate_aggregate = (
+        total_hit_blocks / total_blocks if total_blocks else 0.0
+    )
+
+    earliest_list = [(r.get("stats") or {}).get("earliest_timestamp")
+                     for r in user_reports.values()]
+    latest_list = [(r.get("stats") or {}).get("latest_timestamp")
+                   for r in user_reports.values()]
+    earliest_list = [e for e in earliest_list if e]
+    latest_list = [l for l in latest_list if l]
+    if earliest_list and latest_list:
+        duration_sec = max(latest_list) - min(earliest_list)
+    else:
+        duration_sec = 0
+    duration_min = duration_sec / 60.0 if duration_sec else 0.0
+
+    rpm_avg = total_requests / duration_min if duration_min else 0.0
+    unique_rpm_avg = total_unique_topk / duration_min if duration_min else 0.0
+
     return {
         "n_users": n_users,
         # Multi-tenant when ≥3 users share the model (1-2 users still has
@@ -326,23 +427,205 @@ def compute_model_context(user_reports: dict[str, dict]) -> dict:
             round(ratio, 2) if ratio != float("inf") else "inf (min hit_rate = 0)"
         ),
         "reuse_inversion": inversion,
+        # v2 aggregate
+        "ideal_hit_rate_aggregate": round(ideal_hit_rate_aggregate, 6),
+        "rpm_avg":          round(rpm_avg, 4),
+        "unique_rpm_avg":   round(unique_rpm_avg, 4),
+        "total_unique_blocks_topk": total_unique_topk,
+        "trace_duration_minutes": round(duration_min, 2),
+        # Traffic spike detection (filled by main from detect_traffic_spikes)
+        "traffic_spikes":   traffic_spikes or [],
+        "spike_config":     spike_config or {},
+        # Manual-input fields (HTML red-flag "缺失" when None)
+        "model_params_class":   None,
+        "instance_count":       None,
+        "cache_capacity_blocks": None,
     }
+
+
+def compute_classifications(
+    user_stats: dict,
+    chain_forest_summary: dict,
+    thresholds: dict,
+) -> dict:
+    """6-dim categorical classification per matrix §9.2.2.
+
+    Returns: dict with hit_band / cov_band / chain_len_band /
+    unique_share_band / chain_count_band + is_anomaly flag.
+    """
+    hit = user_stats.get("ideal_hit_rate", 0.0) or 0.0
+    cov_pct = chain_forest_summary.get("dominant_chain_coverage_pct", 0.0) or 0.0
+    cov = cov_pct / 100.0  # convert pct to fraction
+    chain_len_ratio = chain_forest_summary.get("chain_length_ratio", 0.0) or 0.0
+    chain_count = chain_forest_summary.get("total_chains", 0) or 0
+    share = user_stats.get("share_of_model_unique")
+    # share may be None if model context not computed yet; default to "normal"
+    share_val = share if share is not None else 0.0
+
+    def band(value, lo, hi, low_label="low", high_label="high", mid_label="normal"):
+        if value < lo:
+            return low_label
+        if value > hi:
+            return high_label
+        return mid_label
+
+    hit_band  = band(hit, thresholds["hit_low"], thresholds["hit_high"])
+    cov_band  = band(cov, thresholds["cov_low"], thresholds["cov_high"])
+    chain_len_band = (
+        "long" if chain_len_ratio > thresholds["chain_len_ratio_long"] else "short"
+    )
+    unique_share_band = band(
+        share_val,
+        thresholds["unique_share_low"], thresholds["unique_share_high"],
+    )
+    chain_count_band = (
+        "many" if chain_count >= thresholds["chain_count_many"] else "few"
+    )
+
+    # is_anomaly: long chain + low cov + low hit (long chain that doesn't reuse)
+    is_anomaly = (
+        chain_len_band == "long"
+        and cov_band == "low"
+        and hit_band == "low"
+    )
+
+    return {
+        "hit_band":           hit_band,
+        "cov_band":           cov_band,
+        "chain_len_band":     chain_len_band,
+        "unique_share_band":  unique_share_band,
+        "chain_count_band":   chain_count_band,
+        "is_anomaly":         is_anomaly,
+    }
+
+
+def _select_a_subtype(
+    params_class: str | None, n_users: int,
+    has_inversion: bool, hit_band: str, unique_share_band: str,
+    chain_count_band: str, chain_len_band: str, cov_band: str,
+) -> tuple[str, str | None]:
+    """Decide A subtype per matrix §9.2.3 A rules. Returns (subtype, annotation)."""
+    if params_class == "large_200B_moe":
+        return (
+            "A(4) 暂缓",
+            "待人工补 instance_count + cache_capacity_blocks，再决定 A 路由策略",
+        )
+    if (n_users >= 3 and has_inversion
+            and hit_band == "low" and unique_share_band == "high"):
+        return (
+            "A(1) isolation routing",
+            "低 hit + 高 unique_share 用户隔离，防其驱逐其他用户 chain",
+        )
+    if (n_users <= 3 and hit_band == "high"
+            and unique_share_band == "high"
+            and chain_count_band == "many" and chain_len_band == "long"
+            and cov_band in ("normal", "low")):
+        return (
+            "A(2) 多 chain 实例化 + 实例内多队列 LRU",
+            "按 chain 拆分到独立实例 + llm-d prefix_score 路由",
+        )
+    if (n_users <= 3 and hit_band == "high"
+            and unique_share_band == "high"
+            and chain_count_band == "few" and chain_len_band == "short"
+            and cov_band == "high"):
+        return (
+            "A(3) skill/文档 prefix routing",
+            "中段 skill/文档命中，相同 skill 经 prefix_score 路由到同实例",
+        )
+    return ("A0 baseline (llm-d prefix_score)", None)
+
+
+def _select_b_subtype(
+    n_users: int, unique_share_band: str, chain_count_band: str,
+) -> str:
+    """Decide B subtype per matrix §9.2.3 B rules. Model-level switch."""
+    # Multi-tenant with high-unique user OR many chains anywhere → B(2)
+    if (n_users >= 3 and unique_share_band == "high") \
+       or (n_users == 1 and chain_count_band == "many") \
+       or (n_users >= 3 and chain_count_band == "many"):
+        return "B(2) 多队列 LRU（按 user-chain-hash; 淘汰打分 TBD Step 2 实测）"
+    return "B(1) 默认 LRU"
+
+
+def _select_c_subtype(
+    b_subtype: str, unique_share_band: str,
+    chain_count_band: str, chain_len_band: str,
+) -> str | None:
+    """Decide C subtype per matrix §9.2.3 C rules."""
+    if unique_share_band == "high" and b_subtype.startswith("B(1)"):
+        return "C(1) 强池化"
+    if chain_count_band == "many" and chain_len_band == "long":
+        return "C(2) 弱池化（容量保障）"
+    return None
+
+
+def _make_impl_steps_v2(
+    a_subtype: str, b_subtype: str, c_subtype: str | None, primary: str,
+    n_chains: int, top_len: int, top_cov_pct: float, unique: int,
+) -> list[str]:
+    """Per-subtype implementation steps."""
+    steps: list[str] = []
+
+    if "A(1)" in a_subtype:
+        steps.append("将该 user 路由到独立实例 / 独立 cache 池（物理隔离）")
+        steps.append("观察隔离后其他用户的 hit 提升幅度，验证污染假设")
+    elif "A(2)" in a_subtype:
+        steps.append(f"按 chain ({n_chains} 条) 拆分到独立实例，每实例承担一个长 chain")
+        steps.append("配合 llm-d prefix_score 路由相同 chain 请求到同实例")
+        steps.append(f"实例内淘汰用 {b_subtype}")
+    elif "A(3)" in a_subtype:
+        steps.append("部署多实例，按 llm-d prefix_score 自动路由")
+        steps.append("可选: 上调 prefix_score 权重 (>2.0) 增强 skill/文档共享")
+        steps.append(f"实例内淘汰: {b_subtype}")
+    elif "A(4)" in a_subtype:
+        steps.append("⚠️ 大模型 (200B+ MOE): 待人工补 instance_count + cache_capacity_blocks")
+        steps.append("现阶段先按 llm-d baseline 部署，收集生产 cache 命中数据")
+        steps.append("Step 2 实测后，依实例个数 + 容量决定 A 路由策略")
+    elif a_subtype.startswith("A0"):
+        steps.append("使用 llm-d baseline (prefix_score 权重 2.0)，无需额外路由干预")
+
+    if "B(2)" in b_subtype:
+        if n_chains > 0:
+            steps.append(f"为该 user 的 {n_chains} 条 chain 各分配独立 LRU 队列")
+        steps.append("淘汰打分公式 TBD — Step 2 实测调参（输入: unique_rpm / hit_rate / chain_len）")
+    elif "B(1)" in b_subtype:
+        steps.append("使用默认 LRU 淘汰（无需多队列改造）")
+
+    if c_subtype:
+        if "C(1)" in c_subtype:
+            steps.append(f"强池化: 评估 cache 容量是否能 hold {unique:,} unique blocks")
+            steps.append("容量不足时: 物理扩容 / KV 量化 (fp8 或 int8) / 跨实例池化")
+        elif "C(2)" in c_subtype:
+            steps.append("弱池化: 容量保障即可，主要杠杆仍是路由 + LRU")
+
+    if primary == "D":
+        steps.append("与业务方沟通: 减少 prompt 动态字段 (request_id / timestamp / seed)")
+        steps.append("评估业务上限是否真的低 (考虑放弃 prefix cache 优化)")
+
+    return steps
 
 
 def compute_step3_recommendation(
     report_stats: dict, chains: list[dict], inter_arrival: dict,
     new_per_sec_q: dict, model_context: dict | None = None,
+    classifications: dict | None = None,
 ) -> dict:
-    """Decide primary + companion algorithm per decision matrix §3 rules.
+    """Decide subtype recommendations per decision matrix §9.2.3 rules.
 
-    Inputs are subsets of the user_report fields. Output is a dict written
-    to user_report.json as a top-level field, and rendered as §6 in HTML.
+    Inputs:
+      report_stats:     user's stats dict (with share_of_model_unique filled)
+      chains:           user's chain forest
+      new_per_sec_q:    new-block-per-second quantiles
+      model_context:    cross-user signals + model-level metrics (with
+                        manual fields model_params_class / instance_count /
+                        cache_capacity_blocks)
+      classifications:  v2 categorical bands + is_anomaly (from
+                        compute_classifications)
 
-    `model_context` carries cross-user signals (reuse inversion, multi-tenant
-    flag, hit-rate distribution); when None, the function falls back to
-    single-user mode (no A-primary inversion path available).
+    Output dict combines legacy primary/companion (A/B/C/D for CSV) with
+    v2 subtype fields (a_subtype / b_subtype / c_subtype).
 
-    See docs/step3_algorithm_decision_matrix.md for the underlying rules.
+    See docs/step3_algorithm_decision_matrix.md §9.2 for the underlying rules.
     """
     hit_rate = report_stats.get("ideal_hit_rate", 0.0)
     unique = report_stats.get("unique_blocks", 0)
@@ -356,74 +639,70 @@ def compute_step3_recommendation(
     business_type, evidence = _infer_business_type(chains)
 
     ctx = model_context or {}
+    cls = classifications or {}
+
     is_multi = ctx.get("is_multi_tenant", False)
     has_inversion = ctx.get("reuse_inversion", False)
     inversion_ratio = ctx.get("reuse_inversion_ratio")
     n_users_ctx = ctx.get("n_users", 1)
+    params_class = ctx.get("model_params_class")
 
-    # Decision rules per matrix §3 (revised 2026-05-12 to recognize A's
-    # core value in reuse-inversion / multi-tenant cache isolation).
-    primary, companion = None, None
+    hit_band         = cls.get("hit_band", "normal")
+    cov_band         = cls.get("cov_band", "normal")
+    chain_len_band   = cls.get("chain_len_band", "short")
+    unique_share_band = cls.get("unique_share_band", "normal")
+    chain_count_band  = cls.get("chain_count_band", "few")
+    is_anomaly       = cls.get("is_anomaly", False)
 
+    # ===== v2 subtype selection =====
+    a_subtype, a_annotation = _select_a_subtype(
+        params_class, n_users_ctx, has_inversion,
+        hit_band, unique_share_band, chain_count_band,
+        chain_len_band, cov_band,
+    )
+    b_subtype = _select_b_subtype(n_users_ctx, unique_share_band, chain_count_band)
+    c_subtype = _select_c_subtype(b_subtype, unique_share_band,
+                                  chain_count_band, chain_len_band)
+
+    # ===== Legacy primary/companion (for CSV compatibility) =====
     pin_uplift_pp = (top_cov_pct / 100.0) * (1.0 - hit_rate) * 100.0
-    business_ceiling_low = hit_rate < 0.25 and pin_uplift_pp < 5.0
+    business_ceiling_low = hit_rate < 0.30 and pin_uplift_pp < 5.0
 
-    if is_multi and has_inversion:
-        # A-priority (highest in multi-tenant reuse-inversion).
-        # Per-user cache partition prevents low-reuse users from evicting
-        # the high-reuse users' chains — even if this user's own hit rate
-        # is poor (D would apply otherwise), routing isolation still
-        # protects the rest of the tenants.
+    # Primary flavor = which letter dominates
+    if not a_subtype.startswith("A0") and "A(4)" not in a_subtype:
         primary = "A"
+    elif business_ceiling_low and (not chains or top_cov_pct < 10):
+        primary = "D"
+    elif c_subtype == "C(1) 强池化":
+        primary = "C"
+    elif n_chains > 0:
+        primary = "B"
+    else:
+        primary = "D"
+
+    companion = None
+    if primary == "A":
         if business_ceiling_low:
-            # Low-hit user in inversion scenario: route to isolate, then
-            # bring in business-side rewrite as a secondary lever.
             companion = "D"
         elif n_chains > 0:
             companion = "B"
         elif unique >= 200_000:
             companion = "C"
-    elif business_ceiling_low:
-        # D-priority (single-tenant or non-inversion multi-tenant low hit)
-        primary = "D"
+    elif primary == "B":
+        if is_multi:
+            companion = "A"
+        elif unique >= 200_000:
+            companion = "C"
+    elif primary == "C":
         if n_chains > 0:
-            companion = "B"   # light pin still rescues a tiny bit
-    elif unique >= 1_000_000 and hit_rate >= 0.7:
-        # C-priority: extreme cache pressure + already-high reuse
-        primary = "C"
-        if top_len >= 100:
             companion = "B"
         elif is_multi:
             companion = "A"
-    elif is_multi and (unique >= 200_000 or new_p95 >= 200):
-        # A-priority case 2: multi-tenant + moderate cache pressure.
-        # Even without reuse inversion, cross-user driver in a shared
-        # cache hurts everyone; per-user routing + capacity helps.
-        primary = "A"
-        if unique >= 200_000:
-            companion = "C"
-        elif n_chains > 0:
+    elif primary == "D":
+        if n_chains > 0:
             companion = "B"
-    elif n_chains > 0:
-        # B default: chain dominates the user's business
-        primary = "B"
-        if is_multi:
-            companion = "A"     # multi-tenant: pair pin with routing isolation
-        elif unique >= 200_000:
-            companion = "C"     # single-tenant but capacity matters
-    else:
-        # No chain forest detected
-        primary = "D"
-        if is_multi:
-            companion = "A"
 
-    # Difficulty per algorithm
-    difficulty_map = {
-        "A": "high",       # routing layer requires infra changes
-        "B": "low",        # vLLM-level chain pin is a known feature
-        "C": "medium",     # capacity expansion cheap; pooling/quantization harder
-        "D": "high",       # business coordination required
-    }
+    difficulty_map = {"A": "high", "B": "low", "C": "medium", "D": "high"}
     difficulty = difficulty_map.get(primary, "unknown")
 
     estimated = _estimate_uplift(primary, hit_rate, top_cov_pct, n_chains,
@@ -433,48 +712,29 @@ def compute_step3_recommendation(
         hit_rate, n_chains, top_cov_pct, top_len, unique, new_p95,
         business_type,
     )
-    # Extra cross-user reasons when model context triggered A
-    if primary == "A":
-        if has_inversion:
-            reasons.append(
-                f"模型级复用倒置: hit_rate max/min = {inversion_ratio}x "
-                f"(≥ 2.0 触发 A 路由，按 user 隔离 cache 防止驱逐)"
-            )
-        elif is_multi:
-            reasons.append(
-                f"多租户场景 ({n_users_ctx} users) + cache 压力 → 路由分区减少 "
-                f"cross-user 驱逐"
-            )
 
-    # Implementation steps per primary algorithm
-    impl_map = {
-        "A": [
-            "按 user_id 隔离 cache（multi-tenant cache partition），防止重度/低复用用户驱逐其他 user 的 chain",
-            "高优先级用户路由到独立实例 / 独立 cache 池（特别是复用倒置场景的高 hit 用户）",
-            "同 system_prompt 的 request 路由到同实例（prefix-aware batching）",
-            "Step 2 验证：测真实 cache 容量在 user 隔离下能否容纳全部 user chain；同 batch 内 cache 命中行为",
-        ],
-        "B": [
-            f"识别并 pin top {n_chains} 条 chain (dominant chain {top_len} block / cov {top_cov_pct:.1f}%)",
-            "每条 chain 一个独立 LRU 队列 (避免不同 chain 互相驱逐)",
-            "监控 chain hash 生命周期, prompt 版本漂移时及时刷新 pin",
-            "如有 shadow group (人工标注), 同组 chain 合并为一个 pin unit",
-        ],
-        "C": [
-            f"评估 cache 容量是否能 hold {unique:,} unique blocks",
-            "容量不足时考虑: 物理扩容 / KV 量化 (fp8 或 int8) / 跨实例池化",
-            "重要 chain 配合 B 算法做选择性 pin",
-            "多租户场景下与 A 配合：先按 user 分区，再各分区内 LRU + 量化",
-        ],
-        "D": [
-            "与业务方沟通: 减少 prompt 中的动态字段 (request_id / timestamp / 随机 seed)",
-            "评估 system prompt 是否可以模板化、降低同 user 内多版本漂移",
-            "如业务上限本身低 (如分类任务), 接受 prefix cache 不是主要优化点; 转向 prefill 内核优化",
-        ],
-    }
-    implementation = impl_map.get(primary, [])
+    # v2 subtype reasons
+    reasons.append(f"A 子类型: {a_subtype}")
+    reasons.append(f"B 子类型: {b_subtype}")
+    if c_subtype:
+        reasons.append(f"C 子类型: {c_subtype}")
+    if is_anomaly:
+        reasons.append(
+            "⚠️ 反常: 长 chain + 低 cov + 低 hit，建议人工检查 chain decoded 内容 "
+            "(可能是 wrapper boilerplate / 业务噪声而非真业务复用)"
+        )
+    if has_inversion and a_subtype.startswith("A(1)"):
+        reasons.append(
+            f"模型级复用倒置: hit_rate max/min = {inversion_ratio}x (≥ 2.0 触发 A(1) 隔离)"
+        )
+
+    impl_steps = _make_impl_steps_v2(
+        a_subtype, b_subtype, c_subtype, primary,
+        n_chains, top_len, top_cov_pct, unique,
+    )
 
     return {
+        # legacy fields (CSV / 下游兼容)
         "primary_algorithm":  primary,
         "companion_algorithm": companion,
         "business_type":      business_type,
@@ -482,14 +742,24 @@ def compute_step3_recommendation(
         "reasons":            reasons,
         "difficulty":         difficulty,
         "estimated_uplift":   estimated,
-        "implementation_steps": implementation,
+        "implementation_steps": impl_steps,
         "model_context_snapshot": {
             "n_users":          n_users_ctx,
             "is_multi_tenant":  is_multi,
             "reuse_inversion":  has_inversion,
             "reuse_inversion_ratio": inversion_ratio,
+            "model_params_class":   params_class,
+            "instance_count":       ctx.get("instance_count"),
+            "cache_capacity_blocks": ctx.get("cache_capacity_blocks"),
         } if model_context else None,
-        "_note": "see docs/step3_algorithm_decision_matrix.md for the full rule set",
+        # v2 subtype fields (per §9.2)
+        "a_subtype":          a_subtype,
+        "a_annotation":       a_annotation,
+        "b_subtype":          b_subtype,
+        "c_subtype":          c_subtype,
+        "classifications":    classifications,
+        "is_anomaly":         is_anomaly,
+        "_note": "see docs/step3_algorithm_decision_matrix.md §9.2 for v2 rules",
     }
 
 
@@ -661,15 +931,27 @@ def analyze_user(
 
     ideal_hit_rate = hit_blocks / total_blocks if total_blocks else 0.0
 
-    # Top-chain summary for user_summary
+    # v2 fields: avg_blocks_per_request / rpm_avg / unique_rpm_avg
+    avg_blocks_per_request = total_blocks / n_total if n_total else 0.0
+    trace_duration_seconds = (
+        (latest_ts or 0) - (earliest_ts or 0) if (earliest_ts and latest_ts) else 0
+    )
+    trace_duration_minutes = trace_duration_seconds / 60.0 if trace_duration_seconds else 0.0
+    rpm_avg = n_total / trace_duration_minutes if trace_duration_minutes else 0.0
+    unique_rpm_avg = len(seen_keys) / trace_duration_minutes if trace_duration_minutes else 0.0
+
+    # Top-chain summary for user_summary (+ v2 chain_length_ratio)
+    dom_len = forest["chains"][0]["chain_length"] if forest["chains"] else 0
+    chain_length_ratio = (
+        dom_len / avg_blocks_per_request if avg_blocks_per_request else 0.0
+    )
     chain_forest_summary = {
         "total_chains":    len(forest["chains"]),
         "dominant_chain_coverage_pct": (
             forest["chains"][0]["coverage_pct"] if forest["chains"] else 0.0
         ),
-        "dominant_chain_length": (
-            forest["chains"][0]["chain_length"] if forest["chains"] else 0
-        ),
+        "dominant_chain_length": dom_len,
+        "chain_length_ratio": round(chain_length_ratio, 4),
     }
 
     user_report = {
@@ -691,6 +973,12 @@ def analyze_user(
             "ideal_hit_rate":  round(ideal_hit_rate, 6),
             "earliest_timestamp": earliest_ts,
             "latest_timestamp":   latest_ts,
+            "trace_duration_seconds": trace_duration_seconds,
+            "avg_blocks_per_request": round(avg_blocks_per_request, 4),
+            "rpm_avg":          round(rpm_avg, 4),
+            "unique_rpm_avg":   round(unique_rpm_avg, 4),
+            # share_of_model_unique filled in by main() after pass 2
+            "share_of_model_unique": None,
             "analyze_seconds":    round(time.time() - t0, 3),
         },
         "inter_arrival_gaps_seconds":   gap_q,
@@ -809,6 +1097,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mc-min-chain-length",   type=int,   default=DEFAULT_MIN_CHAIN_LENGTH)
     p.add_argument("--mc-min-chain-coverage", type=float, default=DEFAULT_MIN_CHAIN_COVERAGE)
     p.add_argument("--mc-max-chains",         type=int,   default=DEFAULT_MAX_CHAINS)
+    # v2 classification thresholds + spike config (§9.2.2)
+    p.add_argument("--spike-window-min",  type=int,   default=DEFAULT_SPIKE_WINDOW_MIN,
+                   help="Traffic spike detection window size in minutes (default: 5)")
+    p.add_argument("--spike-threshold",   type=float, default=DEFAULT_SPIKE_THRESHOLD,
+                   help="Spike trigger multiplier: bucket[i] / bucket[i-1] (default: 5.0)")
+    p.add_argument("--hit-low",   type=float, default=DEFAULT_HIT_LOW,
+                   help="hit_band low threshold (default 0.30)")
+    p.add_argument("--hit-high",  type=float, default=DEFAULT_HIT_HIGH,
+                   help="hit_band high threshold (default 0.60)")
+    p.add_argument("--cov-low",   type=float, default=DEFAULT_COV_LOW,
+                   help="cov_band low threshold as fraction (default 0.10)")
+    p.add_argument("--cov-high",  type=float, default=DEFAULT_COV_HIGH,
+                   help="cov_band high threshold as fraction (default 0.50)")
+    p.add_argument("--chain-len-ratio-long", type=float, default=DEFAULT_CHAIN_LEN_RATIO_LONG,
+                   help="chain_len_band long threshold (default 0.30)")
+    p.add_argument("--unique-share-low",  type=float, default=DEFAULT_UNIQUE_SHARE_LOW,
+                   help="unique_share_band low threshold (default 0.05)")
+    p.add_argument("--unique-share-high", type=float, default=DEFAULT_UNIQUE_SHARE_HIGH,
+                   help="unique_share_band high threshold (default 0.30)")
+    p.add_argument("--chain-count-many",  type=int,   default=DEFAULT_CHAIN_COUNT_MANY,
+                   help="chain_count_band many threshold (default 3)")
     return p.parse_args()
 
 
@@ -821,11 +1130,20 @@ def main() -> None:
         sys.exit(1)
     print(f"Input: {len(csv_files)} CSV file(s) under {args.raw_csv}", flush=True)
 
-    # Pass 1: counts
+    # Pass 1: counts + req_per_5min for spike detection
     t_pass1 = time.time()
-    counts, total = collect_user_counts(csv_files)
+    counts, total, req_per_window = collect_user_counts(
+        csv_files, window_minutes=args.spike_window_min,
+    )
+    spikes = detect_traffic_spikes(
+        req_per_window,
+        threshold_multiplier=args.spike_threshold,
+        window_minutes=args.spike_window_min,
+    )
     print(
-        f"Pass 1: {total:,} requests across {len(counts)} users  "
+        f"Pass 1: {total:,} requests across {len(counts)} users; "
+        f"{len(spikes)} traffic spike(s) detected at ≥ {args.spike_threshold}× over "
+        f"{args.spike_window_min}min windows  "
         f"({time.time()-t_pass1:.1f}s)",
         flush=True,
     )
@@ -882,35 +1200,83 @@ def main() -> None:
             flush=True,
         )
 
-    # ---- Pass 2: compute model-level context, then per-user Step 3 recommendation ----
-    model_context = compute_model_context(user_reports)
+    # ---- Pass 2: model-level metrics, share_of_model_unique back-fill,
+    #              classifications, then per-user Step 3 recommendation ----
+    spike_config = {
+        "window_minutes":       args.spike_window_min,
+        "threshold_multiplier": args.spike_threshold,
+    }
+    model_context = compute_model_context(
+        user_reports, traffic_spikes=spikes, spike_config=spike_config,
+    )
+
+    # Back-fill share_of_model_unique into each user's stats
+    model_total_unique = model_context["total_unique_blocks_topk"]
+    for uid in selected:
+        u_unique = user_reports[uid]["stats"]["unique_blocks"]
+        share = u_unique / model_total_unique if model_total_unique else 0.0
+        user_reports[uid]["stats"]["share_of_model_unique"] = round(share, 4)
+
     print(
         f"\nModel context: n_users={model_context['n_users']}, "
         f"multi_tenant={model_context['is_multi_tenant']}, "
         f"hit_rate range = [{model_context['min_hit_rate']:.3f}, "
         f"{model_context['max_hit_rate']:.3f}]  "
         f"(reuse inversion ratio = {model_context['reuse_inversion_ratio']}, "
-        f"triggered = {model_context['reuse_inversion']})",
+        f"triggered = {model_context['reuse_inversion']})\n"
+        f"  ideal_hit_rate_aggregate = {model_context['ideal_hit_rate_aggregate']:.4f}, "
+        f"rpm_avg = {model_context['rpm_avg']:.1f}, "
+        f"unique_rpm_avg = {model_context['unique_rpm_avg']:.1f}",
         flush=True,
     )
+
+    thresholds = {
+        "hit_low":               args.hit_low,
+        "hit_high":              args.hit_high,
+        "cov_low":               args.cov_low,
+        "cov_high":              args.cov_high,
+        "chain_len_ratio_long":  args.chain_len_ratio_long,
+        "unique_share_low":      args.unique_share_low,
+        "unique_share_high":     args.unique_share_high,
+        "chain_count_many":      args.chain_count_many,
+    }
 
     for uid in selected:
         report = user_reports[uid]
         forest = user_forests[uid]
+        # Compute v2 classifications (uses share_of_model_unique just filled)
+        classifications = compute_classifications(
+            report["stats"], report["chain_forest_summary"], thresholds,
+        )
+        report["classifications"] = classifications
         report["step3_recommendation"] = compute_step3_recommendation(
             report["stats"],
             forest["chains"],
             report["inter_arrival_gaps_seconds"],
             report["new_unique_blocks_per_sec_q"],
             model_context=model_context,
+            classifications=classifications,
         )
-        # Now write user_report.json (with recommendation)
         udir = args.output_dir / safe_dirname(uid)
         with open(udir / "user_report.json", "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
+    # Write model_report.json (cross-user metrics + spike events + manual placeholders)
+    model_report = dict(model_context)
+    model_report["thresholds"] = thresholds
+    model_report["_note"] = (
+        "Fill model_params_class / instance_count / cache_capacity_blocks manually "
+        "(see decision_matrix.md §9.2.1). HTML §0 renders red when missing."
+    )
+    with open(args.output_dir / "model_report.json", "w", encoding="utf-8") as f:
+        json.dump(model_report, f, indent=2, ensure_ascii=False)
+
     write_summary(args.output_dir, selected, excluded, user_reports, total, len(counts))
-    print(f"\n  output → {args.output_dir}/user_summary.{{json,csv}}", flush=True)
+    print(
+        f"\n  output → {args.output_dir}/user_summary.{{json,csv}} "
+        f"+ model_report.json",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

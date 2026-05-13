@@ -547,7 +547,36 @@ is_anomaly = (user.chain_len_band == "long"
 
 #### 9.2.8 偏差日志（v2 实施时填）
 
-> 工具跑完 7 模型后，记录与 §9.2.5 不一致的 user + 原因。**预期至少 Qwen-32K S773 / Qwen-8B-8K S773 因边界判断会有偏差**。
+**2026-05-13 v2 编码完成，smoke test 通过**：
+
+工具用 3-user synthetic trace 跑通：
+- `heavy_low_hit` (hit 0.27 / share 73% / chain ratio 1.19 / cov 9%) → 正确推荐 **A(1) isolation + B(2) 多队列 + C(2) 弱池化 + is_anomaly=True**
+- `light_chain_user` (hit 0.80 / share 11% / chain ratio 1.00) → A0 baseline + B(1) LRU（unique_share 未达 high 30%，未触发 A(3)）
+- `mid_user` (hit 0.50, 0 chains) → A0 + B(1)
+
+HTML 验证：§0 模型层指标 + §0.1 流量突变 + §1.5 分类标签 + §6 子类型 badge 全部正确渲染；3 个 missing-field 警告（params_class / instance_count / cache_capacity_blocks）+ 1 anomaly-warning（heavy_low_hit）+ 1 tbd-note（B(2) 公式 TBD）全部触发。
+
+**7 模型实测**：本地生产数据 gitignored，待用户在生产环境跑：
+
+```bash
+for model in qwen_v3_32b_8k qwen_v3_32b_32k qwen_v3.5_27b_64k \
+             qwen_v3.5_27b_128k deepseek_v3.1_8k deepseek_v3.1_32k glm_v5.1; do
+  python3 scripts/per_user_report_analyzer.py \
+    --raw-csv  data/${model}/raw \
+    --output-dir outputs/${model}/per_user_reports
+  python3 scripts/render_user_report_html.py \
+    --input-dir outputs/${model}/per_user_reports
+  # 然后人工补 model_report.json 的 model_params_class / instance_count /
+  # cache_capacity_blocks，重新渲染 HTML
+done
+```
+
+跑完后将归类结果与 §9.2.5 对照，**预期偏差**：
+1. Qwen-32K S773 (流量 11.3%, hit 0.07) — §9.2.5 标"A(1) 边界"，实际触发依赖 unique_share 是否 ≥ 30%；若 unique_share < 30% 会落 A0 + D
+2. Qwen-8B-8K S773 — chain ratio 待 avg_blocks_per_request 实测才能确定 long/short；§9.2.5 暂标"待 chain_ratio 实测"
+3. 单 chain 高 cov 但 unique_share 中等的 user（如 Qwen-64K supply/chipset2）— A(2) 触发需要 chain_count ≥ 3 + unique_share ≥ 30%，supply/chipset2 总流量 3% + 1.6% unique_share 可能不到 30%，会落 A0
+
+实测结果与上述偏差一致 → 规则正确；不一致 → 排查阈值或规则错误。
 
 ---
 
