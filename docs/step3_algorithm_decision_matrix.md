@@ -1,7 +1,7 @@
 # Step 3 算法决策矩阵 — 5 维评估 × 4 算法选择
 
 > **创建时间：** 2026-05-12
-> **最近修订：** 2026-05-13（A/B 子类型 framework + llm-d baseline 重新校准 + §4.6 21 user 细化表）
+> **最近修订：** 2026-05-13（A/B 子类型 framework + llm-d baseline 重新校准 + §4.6 21 user 细化表 + §9.2 v2 工具 spec）
 > **上游数据：** [`docs/model_portraits.md`](model_portraits.md)（7 模型 21 用户 chain forest 实测）
 > **上游设计：** [`docs/3step_validation_plan.md`](3step_validation_plan.md) §3 Step 2 / §4 Step 3
 > **适用场景：** 每个 user 选择 Step 3 算法路径的入口文档
@@ -326,7 +326,9 @@ portraits §2 把 Qwen-64K 归到"多 prompt 并行"（multi-chain 队列），�
 
 ---
 
-## 9. 工具自动化（2026-05-12 实施）
+## 9. 工具自动化
+
+### 9.1 v1 实施（2026-05-12）
 
 §3 的映射规则现在已落地到 `per_user_report_analyzer.py`，每次跑 Step 1.5 自动产出推荐：
 
@@ -350,6 +352,202 @@ portraits §2 把 Qwen-64K 归到"多 prompt 并行"（multi-chain 队列），�
 - D：完全业务依赖，无法量化
 
 **重要 caveat**：所有数字都是 Step 1 信号 → 启发式推断，**Step 2 实测前不是承诺**。HTML §6 末尾显式标注此点。
+
+v1 caveat：仅产出粗类型 A/B/C/D 主菜，**不区分 A0/A1/A2/A3 子类型 或 B1/B2/B3**；细类需人工查 §4.6。v2（§9.2）将解决此限制。
+
+---
+
+### 9.2 v2 spec（2026-05-13，待编码）
+
+v1 缺失维度（5 维评估实际只用了 3 维）：
+- ❌ 未抓"每分钟请求数 RPM"、"每分钟写入 unique block 数"
+- ❌ 未做流量突变检测
+- ❌ 未抓"实例个数 / cache 容量 / 模型参数量"（必须人工补，HTML 应红色标注缺失）
+- ❌ 推荐输出粗到 A/B/C/D 主菜，没到子类型
+
+v2 spec 修正上述全部 gap，但**不固定 B(2) 多队列淘汰的打分公式**（留 Step 2 实测调参）。
+
+#### 9.2.1 数据采集新增字段
+
+**模型层**（新建 `model_report.json` 或扩展 `per_user_reports/_aggregate.json`）：
+
+```jsonc
+{
+  // 自动采集
+  "n_users": int,                         // Top-K 后再 ≥3% 流量的 user 数
+  "ideal_hit_rate_aggregate": float,      // 模型 total_hit / total_blocks
+  "rpm_avg": float,                       // total_requests / trace_minutes
+  "unique_rpm_avg": float,                // total_unique_blocks / trace_minutes
+  "traffic_spikes": [                     // 5min req 数窗口 × 5× 突变
+    {"window_start": "...", "window_end": "...", "ratio_to_prev": 7.2}
+  ],
+  "spike_config": {"window_minutes": 5, "threshold_multiplier": 5.0},
+
+  // 人工补字段（HTML 红色标注 "缺失，需人工补"）
+  "model_params_class": null,             // "small_le_32B" | "large_200B_moe"
+  "instance_count": null,                 // 当前部署实例个数
+  "cache_capacity_blocks": null           // 单实例 cache 容量（block 数）
+}
+```
+
+**用户层**（扩展 `user_report.json`）：
+
+```jsonc
+{
+  // 已有字段不变
+  // 新增字段
+  "rpm_avg": float,
+  "unique_rpm_avg": float,
+  "avg_blocks_per_request": float,        // total_blocks / total_requests
+  "chain_length_ratio": float,            // dom_len / avg_blocks_per_request
+  "share_of_model_unique": float,         // user_unique / model_total_unique
+  "classifications": {
+    "hit_band": "low" | "normal" | "high",
+    "cov_band": "low" | "normal" | "high",
+    "chain_len_band": "short" | "long",
+    "unique_share_band": "low" | "normal" | "high",
+    "chain_count_band": "few" | "many"   // ≥ 3 = many
+  },
+  "is_anomaly": bool                      // long + low_cov + low_hit
+}
+```
+
+#### 9.2.2 分类阈值
+
+| 维度 | 低 | 正常 | 高 |
+|---|---|---|---|
+| hit_band | `< 0.30` | `0.30 – 0.60` | `> 0.60` |
+| cov_band | `< 0.10` | `0.10 – 0.50` | `> 0.50` |
+| chain_len_band | — | ratio ≤ 0.3 → short | ratio > 0.3 → long |
+| unique_share_band | `≤ 5%` | `5% – 30%` | `≥ 30%` |
+| chain_count_band | — | `< 3` few | `≥ 3` many |
+| 流量突变 | — | — | `bucket[i+1]/bucket[i] ≥ 5×` (req 数, 5min 窗口) |
+
+所有阈值在 spike_config / classifications config 中可调（默认值写死，CLI flag 可覆盖）。
+
+#### 9.2.3 推荐决策伪代码
+
+**A 子类（路由）**：
+
+```python
+if model.params_class == "large_200B_moe":   # DSK / GLM
+    A = "A(4) 暂缓"
+    note = "待人工补 instance_count + cache_capacity_blocks"
+elif model.n_users >= 3 and reuse_inversion \
+     and user.hit_band == "low" and user.unique_share_band == "high":
+    A = "A(1) isolation"
+elif model.n_users <= 3 and user.hit_band == "high" and user.unique_share_band == "high" \
+     and user.chain_count_band == "many" and user.chain_len_band == "long" \
+     and user.cov_band in ("normal", "low"):
+    A = "A(2) 多 chain 实例化 + 实例内多队列 LRU"
+elif model.n_users <= 3 and user.hit_band == "high" and user.unique_share_band == "high" \
+     and user.chain_count_band == "few" and user.chain_len_band == "short" \
+     and user.cov_band == "high":
+    A = "A(3) skill/文档 prefix routing"
+else:
+    A = "A0 baseline (llm-d)"
+```
+
+**B 子类（淘汰）**——模型层开关 + user 层配置：
+
+```python
+# 模型层开关
+if (model.n_users >= 3 and any(u.unique_share_band == "high" for u in users)) \
+   or (model.n_users == 1 and model.total_chain_count >= 3):
+    B_model = "B(2) 多队列 LRU（按 user-chain-hash; 淘汰打分 TBD）"
+else:
+    B_model = "B(1) 默认 LRU"
+
+# user 层配置（仅 B(2) 触发时有意义）
+if B_model.startswith("B(2)") and user.chain_count >= 1:
+    B_user_config = f"为 user 的 {user.chain_count} 条 chain 各分配 1 个独立队列"
+```
+
+**C 子类（池化）**：
+
+```python
+if user.unique_share_band == "high" and B_model == "B(1) 默认 LRU":
+    # 路由/淘汰边际收益低 → 池化是杠杆
+    C = "C(1) 强池化"
+elif user.chain_count_band == "many" and user.chain_len_band == "long":
+    C = "C(2) 弱池化（容量保障）"
+else:
+    C = None
+```
+
+**反常 user 高亮**：
+
+```python
+is_anomaly = (user.chain_len_band == "long"
+              and user.cov_band == "low"
+              and user.hit_band == "low")
+# HTML 整行黄底 + 文字提示 "chain 长但 cov/hit 双低，建议人工检查 chain decoded 内容
+#                          判断是否 wrapper boilerplate / 业务噪声"
+```
+
+#### 9.2.4 HTML 改动
+
+新增 / 修改板块：
+
+| 板块 | 改动 |
+|---|---|
+| **顶部 §0 模型层指标**（新增） | 表格列：n_users / ideal_hit_rate / rpm_avg / unique_rpm_avg / spike_count / model_params_class / instance_count / cache_capacity_blocks；**后 3 项空时红底**"⚠️ 缺失，需人工补到 `model_report.json`" |
+| **§0.1 流量突变时刻**（新增） | 列 spike 时间窗 + 突变倍数；无 spike 时显示 "无 ≥ 5× 突变" |
+| §1-§5 现有 | 保留 |
+| **§5.1 chain 表格** | 新增列 `chain_length_ratio` + 色标：hit/cov 高（绿）/ 低（红）/ 正常（灰）；is_anomaly 行整行黄底 |
+| **§6 推荐板块** | 改为显示子类型：A(0/1/2/3/4) + B(1/2) + C(1/2)；A(4) 暂缓时显式"待人工补字段"；B(2) 时显式"淘汰打分公式 TBD（Step 2 实测）" |
+
+#### 9.2.5 21 user 终极归类（参考基准）
+
+工具实现后，跑 7 模型应得出与本表一致的子类型；不一致需排查规则。
+
+| user | A | B (模型层) | C | 反常 |
+|---|---|---|---|---|
+| Qwen-64K S773 | A(3) | B(2) | C(1) | — |
+| Qwen-64K supply | A(2) | B(2) | C(2) | — |
+| Qwen-64K chipset2 | A(2) | B(2) | C(2) | — |
+| Qwen-32K nebula | A(1) | B(2) | — | — |
+| Qwen-32K ai.ocr | A0 | B(2) | — | — |
+| Qwen-32K ...000022 | A0 | B(2) | — | — |
+| Qwen-32K S773 | A(1)（边界，流量 11%） | B(2) | — | — |
+| Qwen-32B-8K nebula | A0 | B(2) | — | — |
+| Qwen-32B-8K S773 | A0 | B(2) | — | — |
+| Qwen-32B-8K quality | A0 | B(2) | — | — |
+| Qwen-32B-8K ags | A0 | B(2) | — | — |
+| GLM tianzhou | A(4) 暂缓 | B(2)（单租户 7 chain）| C(2) | — |
+| DS-8K S773 | A(4) 暂缓 | B(2) | — | — |
+| DS-8K mdata | A(4) 暂缓 | B(2) | — | — |
+| DS-8K ebg | A(4) 暂缓 | B(2) | — | — |
+| DS-32K S773 | A(4) 暂缓 | B(2) | — | — |
+| DS-32K mdata | A(4) 暂缓 | B(2) | — | — |
+| **DS-32K cloud** | A(4) 暂缓 | B(2) | — | **✅ 高亮** |
+| Qwen-8B-8K S773 | A0（单租户） | B(1) | — | 待 chain_ratio 实测确认 |
+
+#### 9.2.6 TBD（编码时需注意，留 Step 2 实测）
+
+| 项 | 当前处理 | 后续 |
+|---|---|---|
+| **B(2) 多队列淘汰打分公式** | 工具只推荐 "走 B(2)"，不出公式 | Step 2 实测调参 |
+| **A(1) 流量"高"边界** | 默认用 unique_share_band == "high"（≥ 30%）作为代理；Qwen-32K S773 unique_share 不到 30% 但 hit 极低，规则可能漏 | Step 2 验证后调整 |
+| **chain_length_ratio 实测 vs 估算** | 凡是 avg_blocks_per_request 未确认的 user（如 Qwen-8B-8K S773），先按工具实际算结果分类，可能与 §9.2.5 推断有出入 | 工具跑完后核对，必要时调阈值 |
+| **流量突变响应策略** | 仅检测 + 报告，不进推荐 | Step 2 设计弹性扩容触发 |
+
+#### 9.2.7 编码 checklist（v2 落地前的 spec 检查点）
+
+- [ ] 模型层指标采集（`compute_model_context()` 扩展或新建函数）
+- [ ] 5 min spike 检测器（独立函数 `detect_traffic_spikes(records, window_min, threshold)`）
+- [ ] user 层新增字段（`compute_user_stats()` 加 4 个字段）
+- [ ] 6 个 classification band 计算
+- [ ] is_anomaly 计算
+- [ ] 推荐规则重写为子类型版本（`compute_step3_recommendation()` 大改）
+- [ ] HTML §0 模型层 + §0.1 spike + §5.1 色标 + §6 子类型显示（`render_user_report_html.py` 大改）
+- [ ] 人工补字段 placeholder 红色标注
+- [ ] CLI flag 暴露 spike_threshold / 阈值参数（可调）
+- [ ] 跑 7 模型验证：归类结果与 §9.2.5 一致；不一致项写进 §9.2.8 偏差日志
+
+#### 9.2.8 偏差日志（v2 实施时填）
+
+> 工具跑完 7 模型后，记录与 §9.2.5 不一致的 user + 原因。**预期至少 Qwen-32K S773 / Qwen-8B-8K S773 因边界判断会有偏差**。
 
 ---
 
