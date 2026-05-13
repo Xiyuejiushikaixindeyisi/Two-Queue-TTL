@@ -1,6 +1,7 @@
 # Step 3 算法决策矩阵 — 5 维评估 × 4 算法选择
 
 > **创建时间：** 2026-05-12
+> **最近修订：** 2026-05-13（A/B 子类型 framework + llm-d baseline 重新校准 + §4.6 21 user 细化表）
 > **上游数据：** [`docs/model_portraits.md`](model_portraits.md)（7 模型 21 用户 chain forest 实测）
 > **上游设计：** [`docs/3step_validation_plan.md`](3step_validation_plan.md) §3 Step 2 / §4 Step 3
 > **适用场景：** 每个 user 选择 Step 3 算法路径的入口文档
@@ -32,15 +33,40 @@
 ## 2. 4 种 Step 3 算法（按 cache 优化层级）
 
 ### A. 路由算法（request 调度层）
-- 跨实例分配：把相同 system prompt 的 request 调度到同一实例
-- 同前缀聚合：把同秒到达的 batch 内同前缀请求合并预填
-- 按 user 路由：避免 cross-user cache 互相驱逐
+
+**生产基线（必读）**：目标部署是华为 Maas 平台，路由层已有两种机制：
+1. **负载均衡**（请求级别）
+2. **长短文本分流**（按 max_tokens 分到 8K / 32K 实例，避免长文 TTFT 影响短文）
+
+此外 llm-d 已经实现 prefix-aware routing，打分公式：
+
+```
+final_score(pod) = 2.0 × precise_prefix_cache_score
+                 + 1.0 × kv_cache_utilization_score
+                 + 1.0 × queue_score
+```
+
+prefix_score 权重最高（2.0），意味着**所有 user 默认享受"按共享前缀选 pod"的路由**——不需要主动推 A。本节 A 子类型的真正语义是：**在 llm-d baseline 之上是否需要额外干预**。
+
+| A 子类型 | 何时需要在 baseline 之上加干预 | 实施手段 |
+|---|---|---|
+| **A0 baseline** | 所有 user 默认 | llm-d prefix + utilization + queue 已实现；**不算主动推荐** |
+| **A1 chain affinity** | 固定长 chain + 稳定 user（cache 抖动时 prefix_score 路由会漂动）| 显式 user → pod 绑定 |
+| **A2 prefix routing 调权** | 长文档 / skill 复用主导（动态前缀，非 chain）| llm-d 内已实现；可上调 prefix_score 权重 |
+| **A3 isolation routing** | 低 hit + 高流量、高 unique blocks（污染其他 user）| 单独实例 / cache 物理隔离 |
+
+**A0 不算主动推荐，A1/A2 影响小、A3 是真正"激进路由"**。之前主菜表把 A 当一个动作处理，把所有多租户用户推到 A，是过激进的。
 
 ### B. 淘汰算法（cache 替换层）
-- per-user LRU：每 user 独立淘汰队列
-- chain pin：把识别出的 chain block 标记为 不淘汰
-- 多 chain 队列：每个 chain 一个独立 LRU 子集
-- TTL：长时间未访问的 chain 自动 unpin
+
+| B 子类型 | 适用 | 实施 |
+|---|---|---|
+| **B1 简单 LRU** | 长文档 / skill 复用（动态前缀，非 chain）；chain 极长 pin 不划算 | pod 内默认 LRU |
+| **B2 chain pin** | **短 chain + 高 cov**（pin 成本低、覆盖高）| KV block 标记 not-evictable |
+| **B3 多 chain 队列** | 单 user 内多条独立 chain | 每 chain 一个 LRU 子集 |
+| **B-TTL（辅）** | 配合 B2 / B3 防止僵尸 chain 占容量 | 长时间未访问 unpin |
+
+**B 默认不是 B2 chain pin**——长 chain 用户更应该走 B1 LRU（pin 容量过大）。B2 适用面窄：短 chain（≤ 100 block 量级）且 cov 中等以上。
 
 ### C. KV cache 池化算法（容量层）
 - 容量分区：cache 按 user / chain 划分配额
@@ -62,34 +88,52 @@
 
 | 优先级 | 触发条件 | 主菜算法 | 原因 |
 |---|---|---|---|
-| **1** | **multi_tenant (≥ 3 user) + reuse_inversion (max/min hit_rate ≥ 2.0)** | **A（路由 / cache 隔离）** | **重度低复用用户驱逐其他用户的 chain，路由分区是首选**；即使本 user hit < 25%（D 适用），路由仍是关键以保护其他 user |
-| 2 | `hit_rate < 25%` + chain pin uplift < 5pp | **D（业务侧重写）** | 单租户 / 非倒置场景下业务上限低 |
-| 3 | `unique_blocks ≥ 1M` + `hit_rate ≥ 0.7` | **C（池化 / 容量）** | 大模型 + 高 reuse 已知，瓶颈是容量 |
-| 4 | multi_tenant + `unique ≥ 200K` 或 `new_block_per_sec_p95 ≥ 200` | **A（路由 / batch 聚合）** | 多租户 + 中度压力（即使无倒置）路由分区仍能减少 cross-user 驱逐 |
-| 5 | `chains > 0`（chain 主导业务） | **B（淘汰 / chain pin）** | 默认 |
-| 6 | 无 chain forest 兜底 | **D**（multi 加 A 辅） | |
+| **1** | **multi_tenant (≥ 3 user) + reuse_inversion (max/min hit_rate ≥ 2.0) + 本 user 低 hit + 高流量** | **A（A3 isolation routing）** | 低复用用户驱逐其他用户的 chain，**单实例隔离是直接解**；不是所有多租户 user 都走 A，仅低 hit + 高流量的"污染源" user |
+| 2 | `hit_rate < 25%` + chain pin uplift < 5pp | **D（业务侧重写）** | 业务上限低；可与 A3 配合（低 hit 高流量 user = D + A3） |
+| 3 | `unique_blocks ≥ 1M` + `hit_rate ≥ 0.7` | **C（池化 / 容量）** | 大模型 + 高 reuse，瓶颈是容量 |
+| 4 | 单 user 有长 chain（≥ 200 block）且稳定 | **A（A1 chain affinity）+ B1 LRU** | 长 chain 不 pin（pin 容量过大），改为 user → pod 绑定 + pod 内 LRU |
+| 5 | 单 user 有 **短** chain（≤ 100 block）且 cov ≥ 15% | **B（B2 chain pin）** | 默认；pin ROI 高 |
+| 6 | 单 user 有 ≥ 3 条独立短 chain | **B（B3 多 chain 队列）** | 默认 |
+| 7 | 长文档 / skill 复用（动态前缀，无 chain）| **A2 prefix routing + B1 LRU** | 依赖 llm-d prefix_score；pod 内 LRU |
+| 8 | 无 chain forest 且不触发 1–3 兜底 | **D**（+ A0 baseline 即可） | |
 
-**2026-05-12 关键修订**：A 优先级从最后一名（高 QPS 触发）提到第一名（reuse_inversion 触发）。原因：复用倒置的核心是"低复用用户驱逐高复用用户的 chain"，**路由按 user 隔离 cache 是这个问题的唯一直接解**，比 chain pin 更根本。Qwen-32K / DS-32K 等复用倒置 4–8x 的模型，所有用户都应该走 A 主菜。
+**重要语义修订（2026-05-13）**：
+
+- **A 不再是"多租户必走主菜"**。llm-d baseline 已经做了 prefix-aware routing，A 的真正语义是"额外干预"——只在 A1（长 chain affinity）/ A3（污染源隔离）触发；A0/A2 不算主动推荐。
+- **B 不再默认是 chain pin**。多数用户（长文档、长 chain）实际上是 **B1 LRU**；B2 chain pin 适用面窄（短 chain + 中等 cov 以上）。
+- **2026-05-12 的"A 优先级 1"修订过激进**：把所有多租户 user 都推到 A 不正确。本次修订（2026-05-13）将 A1（priority 1）限定到"低 hit + 高流量的污染源"，多租户 chain 主导用户回到 B5/B6。
 
 ### 辅菜规则（通常组合）
 
 | 主菜 | 辅菜组合 | 适用 |
 |---|---|---|
-| A | **A + B** | 多租户 / 倒置 + 该 user 有 chain（路由隔离 + chain pin，如 Qwen-32K 大部分用户、DS-32K mdata） |
-| A | **A + D** | 多租户 / 倒置 + 该 user hit < 25%（路由隔离保护其他 user，业务侧改写作补充，如 Qwen-32K nebula） |
-| A | **A + C** | 多租户 / 倒置 + 该 user 无 chain 但 cache 压力大 |
-| B | **B + C** | 单租户长 chain（pin + 容量保障，如 Qwen-64K chipset2） |
-| B | **B + A** | 多租户 chain 主导（pin + 路由保护，如 Qwen-32B-8K 多数 user） |
-| C | **C + B** | 大模型 + 部分 user 有强 chain（容量扩张 + 轻 pin） |
-| C | **C + A** | 大模型 + 多租户（容量扩张 + 分区路由） |
-| D | **D + 轻 B** | 单租户 hit 低但 chain 仍有点价值 |
+| **A3 isolation** | **A3 + D** | 污染源 user（低 hit 高流量）：隔离 + 业务侧重写（Qwen-32K nebula、DS-32K S773 / cloud） |
+| **A1 affinity** | **A1 + B1 LRU** | 长 chain 用户：绑定 pod + pod 内 LRU（Qwen-64K supply / chipset2） |
+| **A2 prefix** | **A2 + B1 LRU** | 长文档复用：依赖 llm-d + pod 内 LRU（Qwen-64K S773） |
+| **B2 pin** | **B2 + A0 baseline** | 短 chain 高 cov（默认走 A0 baseline，不需要 A 主动干预） |
+| **B3 多队列** | **B3 + A0 baseline** | 多独立 chain（DS-8K 全部 user、Qwen-32B-8K ags） |
+| C | **C + B1 / B2** | 大模型 + 容量保障（Qwen-64K chipset2 是 C + B1 LRU + A1 affinity 三合一） |
+| **D** | **D + A0 baseline** | 单租户低 hit（Qwen-8B-8K） |
+| **D** | **D + A3 isolation** | 多租户低 hit 高流量 = 污染源 |
 
 ### 例外 / 边界
 
-- **chain forest 为空（如 Qwen-32K nebula）**：跳过 B；只能 D 或 A
+- **chain forest 为空（如 Qwen-32K nebula）**：跳过 B；走 D + A3
 - **shadow group 存在（人工标注）**：pin 时同 group 合并算容量
-- **单租户 + 长 chain（如 GLM）**：B 主菜，C 看 cache 容量是否够 unique
-- **单租户 + 短 chain 高 hit（如 Qwen-64K S773）**：C 主菜（容量保 user-internal 复用），B 弱化
+- **单租户 + 长 chain（如 GLM）**：B2 pin 全 chain（156-377 block 范围还在 pin 划算区间），C 备容量
+- **单租户 + 短 chain 高 hit（如 Qwen-64K S773）**：C 主菜 + B1 LRU；不 pin 17 block chain（长文档复用靠 llm-d prefix_score + LRU）
+
+### 工具自动化 caveat（重要）
+
+> **§9 描述的 `per_user_report_analyzer.py` 自动推荐是"粗粒度"**：它产出 `primary=A/B/C/D` 但不区分 A0/A1/A2/A3 或 B1/B2/B3。
+>
+> **A/B 子类型必须人工根据 chain 形态判断**：
+> - chain 数量（1 / 2-3 / 4+）
+> - dom_len 长度（≤ 100 = 短；100-500 = 中；> 500 = 长）
+> - cov 比例（≥ 15% = pin 划算；< 5% = LRU）
+> - hit_rate + 流量占比组合（低 hit + 高流量 = 污染源 → A3）
+>
+> §4.6 给出 21 user 的细化映射作为参考。新模型分析时：先看工具粗推荐，再查 §4.6 同形态用户的细化判断。
 
 ---
 
@@ -139,6 +183,49 @@
 | **Qwen-32K** | ai.ocr | 0.38 | **B 探索** | 4 chain 短（20 block dom_len），pin 收益不确定，需 Step 2 实测真实命中率 |
 | **DS-8K** | mdata.mdata20180908 | 0.25 | **B 多队列** | 5 chain 短（14-95 block dom_len），与同名 DS-32K 用户业务相同但 chain 短 8 倍 |
 
+### 4.6 A/B 子类型细化（21 user 人工判断，2026-05-13）
+
+§4.1–§4.5 给的是工具粗推荐（A/B/C/D 主菜）。本表用 §2 引入的 A0/A1/A2/A3 + B1/B2/B3 子类型重新分类，结合 llm-d baseline 真实语义。**新模型分析时优先查本表同形态用户**。
+
+| 模型 | user | 流量 | hit | chain 形态 | 工具粗推荐 | **细化推荐** | 关键论据 |
+|---|---|---|---|---|---|---|---|
+| **Qwen-64K** | S773 | 95.2% | 0.82 | 短 chain 17 + 长文档复用 | C + A | **A2 prefix + B1 LRU + C 容量** | 17 block pin 价值低；长文档靠 llm-d prefix_score |
+| **Qwen-64K** | supply.ioc.rock | 3.1% | 0.74 | 10 chains × 380-1374 | C + B | **A1 affinity + B1 LRU** | 10 chain 平均 700 block，pin 容量过大 |
+| **Qwen-64K** | chipset2 | 1.6% | 0.92 | 7 chains × 1172-1802 | C + B | **A1 affinity + B1 LRU + C 容量** | 同理，长 chain 不 pin |
+| **Qwen-32K** | nebula | 27.9% | 0.15 | 0 chains, 2.6M unique | D + A | **A3 isolation + D** | 2.6M unique 必须单独实例防污染 |
+| **Qwen-32K** | ai.ocr | 24.5% | 0.38 | 4 chains 20 block dom_len | B 探索 | **A0 baseline + B1 LRU** | chain 短 cov 低，pin ROI 不高 |
+| **Qwen-32K** | ...000022 | 12.0% | 0.73 | 1 chain 65 / cov 28.9% | B 单 chain | **A0 + B2 chain pin** | 短 chain 中 cov，pin 划算 |
+| **Qwen-32K** | S773 | 11.3% | 0.07 | 1 chain 10 | D + 轻 B | **A3 isolation + D** | 流量小但 hit 极低，仍是污染源 |
+| **Qwen-32B-8K** | nebula | 47.6% | 0.71 | 2 chains 23 / 24.9% | B + A | **A0 + B2 chain pin** | 短 chain，pin 划算 |
+| **Qwen-32B-8K** | S773 | 21.4% | 0.73 | 2 chains 34 / 41.4% | B + A | **A0 + B2 chain pin + shadow 合并** | 短 chain 高 cov；§6.4 shadow 修正 |
+| **Qwen-32B-8K** | quality_public_sentiment | 12.0% | 0.75 | 2 chains 14 / 61.8% | B + A | **A0 + B2 chain pin** | 全平台 pin ROI 第一 |
+| **Qwen-32B-8K** | ags | 11.0% | 0.80 | 6 chains 100 / 17.5% | B + A | **A0 + B3 多队列** | 6 chain 各自独立 |
+| **GLM-V5.1** | tianzhou.ai | 100% | 0.94 | 7 chains 156-377 | B pin 全 | **A0 + B2 pin 全 7 chain + C 备容量** | 单租户，1463 block 总 pin 容量在划算区间 |
+| **DS-8K** | S773 | 88.5% | 0.55 | 3 chains 56 / 46.6% | B 多队列 | **A0 + B3 多队列** | 3 chain 各自独立 |
+| **DS-8K** | mdata | 3.6% | 0.25 | 5 chains 14-95 | B 多队列 | **A0 + B3 多队列** | 同上 |
+| **DS-8K** | ebg.ioc.efc | 3.5% | 0.71 | 6 chains 20-58 / cov 47.5% | B 多队列 | **A0 + B3 多队列** | 6 chain 累计 cov 高 |
+| **DS-32K** | S773 | 60.8% | 0.09 | 1 chain 10 | D + 轻 B | **A3 isolation + D** | 60.8% 流量 + hit 9%，最强污染源 |
+| **DS-32K** | mdata | 14.9% | 0.70 | 4 chains 588 / 14 / 14 / 815 | B + shadow | **A0 + B2 chain pin（含 shadow 合并）+ A1 affinity** | chain 1+2 shadow 后 14 block pin 24% cov；588/815 长 chain 用 affinity |
+| **DS-32K** | cloud.ioc.global | 14.7% | 0.04 | 1 chain 60 | D | **A3 isolation + D** | hit 4% 是污染源 |
+| **Qwen-8B-8K** | S773 | 100% | 0.17 | 1 chain 14 | D | **A0 + D 业务侧** | 单租户无路由可做 |
+
+**汇总（子类型主菜分布）**：
+
+| 子类型主菜 | user 数 | 流量占比 | 典型代表 |
+|---|---|---|---|
+| A3 isolation routing | 4 | 27.9 + 11.3 + 60.8 + 14.7 = ~115%（跨模型）| Qwen-32K nebula、DS-32K S773 / cloud、Qwen-32K S773 |
+| A1 chain affinity | 3 | ~5% | Qwen-64K supply / chipset2、DS-32K mdata 长 chain 部分 |
+| A2 prefix routing | 1 | Qwen-64K 95% | Qwen-64K S773 |
+| A0 baseline only | 13+ | 大部分 | 所有其他 user |
+| B1 LRU only | 4 | ~30% | Qwen-64K 全 3 user + Qwen-32K ai.ocr |
+| B2 chain pin | 6 | ~25% | DS-8K S773 chain 0、Qwen-32B-8K 4 user、Qwen-32K 000022、DS-32K mdata |
+| B3 多队列 | 4 | ~10% | DS-8K 全 3 user、Qwen-32B-8K ags |
+
+**关键观察**：
+1. 真正需要工程层 A 干预的（A1 + A3 = 7 user），不到一半；多数走 A0 baseline + B1/B2/B3
+2. B1 LRU（4 user）+ B2 chain pin（6 user）+ B3 多队列（4 user）≈ 14 user，**多于工具粗推荐 B 的覆盖**——因为长文档用户在工具里被推 C，实际淘汰侧仍是 LRU
+3. D 主菜（5 user）中 **4 个** 配 A3 isolation（不是单独走 D），印证 §3 主菜规则 priority 1 + 2 的组合
+
 ---
 
 ## 5. 模型级最优策略汇总
@@ -168,6 +255,11 @@
 ### 6.3 A 早于 B（多租户共享前缀 + 高 QPS）
 
 如果某个 system prompt 被多 user 共走（即模型 1.1 的 global chain cov 高）**且** QPS ≥ 1K，**先路由聚合再考虑 pin**。否则 cache 被不同 user 互相驱逐，pin 也保不住。
+
+**llm-d baseline 修订（2026-05-13）**：在 llm-d 部署下，"多 user 共走 prefix 路由聚合"由 prefix_cache_score（权重 2.0）自动完成，**不需要工程层 A 干预**。本规则的真正语义变为：
+- 共享 prefix 且 QPS ≥ 1K → A0 baseline 就够（llm-d 自动 batch 聚合同 prefix）
+- 仅当 cache 抖动让 prefix_score 路由飘动时 → 升级到 A1 chain affinity
+- 仅当低 hit + 高流量 user 污染其他 user → 升级到 A3 isolation
 
 ### 6.4 shadow group（人工标注）的修正
 
@@ -206,6 +298,21 @@ Qwen-32B-8K ags 是 Top-4 才能看到的用户，hit 0.80 全模型最高。**�
 ### 7.4 C 池化优先级被低估
 
 portraits §2 把 Qwen-64K 归到"多 prompt 并行"（multi-chain 队列），但实测表明**主用户的瓶颈是容量不是 chain**。Step 3 算法设计 should start with "how much cache budget" rather than "what to pin"——这是决策矩阵相对二维分类的核心差异。
+
+### 7.5 llm-d baseline 重新校准 A 的语义（2026-05-13）
+
+回看 §2 / §4 之前的 "A 主菜" 分类，多数 user 其实只需要 A0 baseline（llm-d 已实现），不需要工程层干预。真正"需要做事" 的 A 子类型仅 7 user（A1 × 3 + A2 × 1 + A3 × 4）：
+
+| 之前误判 | 修订认知 |
+|---|---|
+| "多租户必走 A 主菜" | 多租户在 llm-d 下默认有 prefix-aware routing；只有低 hit 高流量污染源才升级到 A3 isolation |
+| "A + B 组合是主流" | 多数 user 是 A0 + B（B1/B2/B3）；A 没动作只是 baseline 兜底 |
+| "B 主菜 = chain pin" | B 默认是 B1 LRU；B2 pin 适用面窄（短 chain + cov ≥ 15%）；长 chain 用户反而是 B1 LRU 更优 |
+
+**对 portraits / Step 3 算法设计的影响**：
+- 工程优先级排序应该是 **A3 isolation > B2/B3 chain pin > C 容量 > D 业务侧 > A1/A2 微调**
+- A1/A2 在 llm-d 部署下投入产出比低，除非生产观察到 prefix_score 路由抖动
+- A3 isolation 是最值得投入的 A 子类型（4 user 占跨模型流量大头），且实施门槛低（DevOps 层即可，不需要改算法）
 
 ---
 
