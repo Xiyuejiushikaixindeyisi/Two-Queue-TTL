@@ -1025,7 +1025,9 @@ def write_summary(
         s = r["stats"]
         cs = r["chain_forest_summary"]
         rec = r.get("step3_recommendation") or {}
+        cls = r.get("classifications") or {}
         rows.append({
+            # ----- legacy fields (kept for backward-compat) -----
             "user_id":                    uid,
             "request_count":              s["total_requests"],
             "request_pct":                round(s["total_requests"] / total_requests * 100, 3)
@@ -1040,6 +1042,20 @@ def write_summary(
             "rec_primary":                rec.get("primary_algorithm", ""),
             "rec_companion":              rec.get("companion_algorithm", "") or "",
             "rec_difficulty":             rec.get("difficulty", ""),
+            # ----- v2 fields (§9.2) -----
+            "chain_length_ratio":         cs.get("chain_length_ratio", ""),
+            "share_of_model_unique":      s.get("share_of_model_unique", ""),
+            "rpm_avg":                    s.get("rpm_avg", ""),
+            "unique_rpm_avg":             s.get("unique_rpm_avg", ""),
+            "hit_band":                   cls.get("hit_band", ""),
+            "cov_band":                   cls.get("cov_band", ""),
+            "chain_len_band":             cls.get("chain_len_band", ""),
+            "unique_share_band":          cls.get("unique_share_band", ""),
+            "chain_count_band":           cls.get("chain_count_band", ""),
+            "is_anomaly":                 cls.get("is_anomaly", ""),
+            "a_subtype":                  rec.get("a_subtype", "") or "",
+            "b_subtype":                  rec.get("b_subtype", "") or "",
+            "c_subtype":                  rec.get("c_subtype", "") or "",
         })
 
     summary_json = {
@@ -1054,9 +1070,17 @@ def write_summary(
 
     csv_path = output_dir / "user_summary.csv"
     fieldnames = list(rows[0].keys()) if rows else [
+        # legacy
         "user_id", "request_count", "request_pct", "ideal_hit_rate",
         "chain_forest_count", "dominant_chain_cov_pct", "dominant_chain_length",
         "p50_gap", "p95_gap", "new_block_per_sec_p95",
+        "rec_primary", "rec_companion", "rec_difficulty",
+        # v2
+        "chain_length_ratio", "share_of_model_unique",
+        "rpm_avg", "unique_rpm_avg",
+        "hit_band", "cov_band", "chain_len_band",
+        "unique_share_band", "chain_count_band", "is_anomaly",
+        "a_subtype", "b_subtype", "c_subtype",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1262,13 +1286,30 @@ def main() -> None:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
     # Write model_report.json (cross-user metrics + spike events + manual placeholders)
+    # Preserve manually-filled fields from a prior run so re-running the
+    # analyzer doesn't clobber what the user typed in.
     model_report = dict(model_context)
     model_report["thresholds"] = thresholds
     model_report["_note"] = (
         "Fill model_params_class / instance_count / cache_capacity_blocks manually "
-        "(see decision_matrix.md §9.2.1). HTML §0 renders red when missing."
+        "(see decision_matrix.md §9.2.1). HTML §0 renders red when missing. "
+        "Re-running the analyzer preserves these three fields."
     )
-    with open(args.output_dir / "model_report.json", "w", encoding="utf-8") as f:
+    mr_path = args.output_dir / "model_report.json"
+    if mr_path.exists():
+        try:
+            existing = json.load(open(mr_path, encoding="utf-8"))
+            for field in ("model_params_class", "instance_count",
+                          "cache_capacity_blocks"):
+                ev = existing.get(field)
+                if ev is not None:
+                    model_report[field] = ev
+                    print(f"  preserved manual field {field}={ev} from existing "
+                          f"model_report.json", flush=True)
+        except Exception as e:
+            print(f"  warning: failed to read existing model_report.json: {e}",
+                  flush=True)
+    with open(mr_path, "w", encoding="utf-8") as f:
         json.dump(model_report, f, indent=2, ensure_ascii=False)
 
     write_summary(args.output_dir, selected, excluded, user_reports, total, len(counts))
