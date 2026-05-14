@@ -41,8 +41,9 @@ import json
 import re
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from verify_chain_path_closure import (  # noqa: E402
@@ -86,25 +87,45 @@ DEFAULT_SPIKE_THRESHOLD = 5.0
 
 def collect_user_counts(
     csv_files: list[Path], window_minutes: int = 5,
-) -> tuple[dict[str, int], int, dict[int, int]]:
-    """Single pass: counts requests per user AND per N-min bucket for spike detection.
+) -> tuple[dict[str, int], int, dict[int, int], dict[int, int], int, int, int]:
+    """Single pass: counts requests per user, model-level time series, spike bucket.
 
-    Returns (per_user_counts, total_requests, req_per_window_bucket).
-    Bucket index = floor(timestamp_seconds / (window_minutes * 60)).
+    Returns:
+        (per_user_counts, total_requests, req_per_window_bucket,
+         model_req_per_min, ts_parse_failed_count, earliest_ts, latest_ts)
+
+    Bucket index for spike: floor(ts / (window_minutes * 60)).
+    `model_req_per_min` aggregates *all* users for HTML §1 model-level quantile.
+    `ts_parse_failed_count` is the count of rows where timestamp parse failed
+    (fallback to 0) — feeds the rpm_avg=0 bug diagnostic.
     """
     counts: dict[str, int] = defaultdict(int)
     req_per_window: dict[int, int] = defaultdict(int)
+    model_req_per_min: dict[int, int] = defaultdict(int)
     total = 0
     bucket_secs = window_minutes * 60
+    ts_parse_failed = 0
+    earliest_ts: Optional[int] = None
+    latest_ts: Optional[int] = None
+
     for _rid, user_id, _prompt, ts in iter_raw_records(csv_files):
         counts[user_id] += 1
         try:
             ts_int = int(float(ts))
         except (ValueError, TypeError):
             ts_int = 0
+            ts_parse_failed += 1
         req_per_window[ts_int // bucket_secs] += 1
+        model_req_per_min[ts_int // 60] += 1
+        if earliest_ts is None or ts_int < earliest_ts:
+            earliest_ts = ts_int
+        if latest_ts is None or ts_int > latest_ts:
+            latest_ts = ts_int
         total += 1
-    return dict(counts), total, dict(req_per_window)
+    return (
+        dict(counts), total, dict(req_per_window), dict(model_req_per_min),
+        ts_parse_failed, earliest_ts or 0, latest_ts or 0,
+    )
 
 
 def detect_traffic_spikes(
@@ -196,10 +217,124 @@ def percentile_int(sorted_values: list[int], pct: float) -> int:
     return int(round(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (k - lo)))
 
 
-def lcp_histogram(lcps: list[int]) -> tuple[list[dict], dict]:
-    """Equal-width histogram with ~30 buckets; returns (buckets, quantiles)."""
+def _compute_chain_shadow_pairs(
+    chains: list[dict],
+    min_shared: int = 5,
+    min_ratio: float = 0.30,
+) -> list[dict]:
+    """v3 §8: detect chains with substantial shared prefix.
+
+    "Substantial" = shared_prefix_blocks >= min_shared AND
+    (ratio_a >= min_ratio OR ratio_b >= min_ratio).
+
+    Filters out root-level micro-shares (e.g., 1-block system prompt header
+    that always overlaps between chains) to keep warning meaningful.
+    "chain 数虚高" 警告应该指向 "chain 0 + chain 1 前 100 block 完全一致" 这种.
+
+    Defaults: min_shared=5 blocks, min_ratio=30%. Configurable via CLI flags.
+    """
+    pairs: list[dict] = []
+    for i in range(len(chains)):
+        for j in range(i + 1, len(chains)):
+            keys_a = [b.get("prefix_path_key") for b in chains[i].get("decoded_content", [])]
+            keys_b = [b.get("prefix_path_key") for b in chains[j].get("decoded_content", [])]
+            if not keys_a or not keys_b:
+                continue
+            common = 0
+            for k1, k2 in zip(keys_a, keys_b):
+                if k1 is not None and k1 == k2:
+                    common += 1
+                else:
+                    break
+            if common < min_shared:
+                continue
+            la = len(keys_a)
+            lb = len(keys_b)
+            ratio_a = common / la if la else 0
+            ratio_b = common / lb if lb else 0
+            if ratio_a < min_ratio and ratio_b < min_ratio:
+                continue
+            pairs.append({
+                "chain_a": chains[i].get("chain_id", i),
+                "chain_b": chains[j].get("chain_id", j),
+                "shared_prefix_blocks": common,
+                "chain_a_length": la,
+                "chain_b_length": lb,
+                "ratio_a": round(ratio_a, 3),
+                "ratio_b": round(ratio_b, 3),
+            })
+    return pairs
+
+
+def _reuse_time_quantiles(reuse_times: list[int]) -> dict:
+    """v3 §6 reuse_time quantile summary."""
+    if not reuse_times:
+        return {"avg": 0.0, "p50": 0, "p80": 0, "p95": 0, "max": 0, "count": 0}
+    sorted_rt = sorted(reuse_times)
+    return {
+        "avg":   round(sum(sorted_rt) / len(sorted_rt), 2),
+        "p50":   percentile_int(sorted_rt, 50),
+        "p80":   percentile_int(sorted_rt, 80),
+        "p95":   percentile_int(sorted_rt, 95),
+        "max":   sorted_rt[-1],
+        "count": len(sorted_rt),
+    }
+
+
+def _reuse_time_cdf_log(reuse_times: list[int], n_points: int = 50) -> list[dict]:
+    """v3 §6 reuse_time CDF sampled at log-spaced x.
+
+    Returns [{t_seconds, cumulative_pct}] — used by HTML svg_cdf_log_x.
+    Log-spaced sampling between 1s and max(reuse_times).
+    Floor of log10(0) handled: t_seconds = 0 always cumulative_pct = 0.
+    """
+    if not reuse_times:
+        return []
+    sorted_rt = sorted(reuse_times)
+    max_rt = sorted_rt[-1]
+    n_total = len(sorted_rt)
+
+    # Generate log-spaced t values from 1 to max_rt
+    import math
+    if max_rt <= 1:
+        ts_grid = [0, max_rt]
+    else:
+        log_max = math.log10(max_rt)
+        ts_grid = [0] + [
+            max(1, int(round(10 ** (i * log_max / (n_points - 1)))))
+            for i in range(n_points)
+        ]
+        # Dedupe (after rounding)
+        ts_grid = sorted(set(ts_grid))
+
+    points = []
+    for t in ts_grid:
+        # Binary-search-like cumulative count of rt <= t
+        cnt = 0
+        for rt in sorted_rt:
+            if rt <= t:
+                cnt += 1
+            else:
+                break
+        points.append({
+            "t_seconds": t,
+            "cumulative_pct": round(cnt / n_total * 100, 3),
+        })
+    return points
+
+
+def lcp_histogram(lcps: list[int]) -> tuple[list[dict], dict, list[dict]]:
+    """Equal-width histogram with ~30 buckets.
+
+    Returns: (histogram, quantiles_dict, top10_lcp_values)
+      - histogram:    [{lcp_low, lcp_high, count}] equal-width buckets
+      - quantiles:    {p30, p50, p80, p95, max, bucket_size}  (v3: add p30 + p80)
+      - top10:        [{lcp_value, request_count}] most common LCP values
+    """
     if not lcps:
-        return [], {"p50": 0, "p95": 0, "max": 0}
+        return ([],
+                {"p30": 0, "p50": 0, "p80": 0, "p95": 0, "max": 0, "bucket_size": 1},
+                [])
     sorted_lcps = sorted(lcps)
     max_lcp = sorted_lcps[-1]
     bucket_size = max(1, max_lcp // 30)
@@ -215,12 +350,20 @@ def lcp_histogram(lcps: list[int]) -> tuple[list[dict], dict]:
         for b, n in sorted(buckets.items())
     ]
     quantiles = {
+        "p30": percentile_int(sorted_lcps, 30),
         "p50": percentile_int(sorted_lcps, 50),
+        "p80": percentile_int(sorted_lcps, 80),
         "p95": percentile_int(sorted_lcps, 95),
         "max": max_lcp,
         "bucket_size": bucket_size,
     }
-    return histogram, quantiles
+    # v3 §7: Top-10 LCP values (raw request counts at each LCP value)
+    lcp_counter = Counter(lcps)
+    top10 = [
+        {"lcp_value": lcp_val, "request_count": cnt}
+        for lcp_val, cnt in lcp_counter.most_common(10)
+    ]
+    return histogram, quantiles, top10
 
 
 def _infer_business_type(chains: list[dict]) -> tuple[str, str]:
@@ -335,13 +478,19 @@ def compute_model_context(
     user_reports: dict[str, dict],
     traffic_spikes: list[dict] | None = None,
     spike_config: dict | None = None,
+    n_users_total: int | None = None,
+    ts_parse_failed_count: int = 0,
+    requests_per_min_q: dict | None = None,
+    new_unique_blocks_per_sec_q: dict | None = None,
 ) -> dict:
-    """Per-model cross-user signals + v2 aggregate metrics.
+    """Per-model cross-user signals + v3 aggregate metrics.
 
-    Used by compute_step3_recommendation to detect reuse inversion,
-    multi-tenant cache pressure, spike events, and to expose the manual
-    fields (model_params_class / instance_count / cache_capacity_blocks)
-    needed for full decision matrix §9.2 evaluation.
+    `n_users_total` is the count of distinct user_ids in the whole model
+    (from pass-1 collect_user_counts), distinct from `n_users` which is
+    the count of Top-K selected users analyzed in detail.
+
+    `ts_parse_failed_count` and `trace_duration_caveat` help diagnose the
+    rpm_avg=0 / unique_rpm_avg=0 bug (see user_report_html_redesign.md §4.1).
     """
     hit_rates = []
     for r in user_reports.values():
@@ -351,6 +500,7 @@ def compute_model_context(
     if not hit_rates:
         return {
             "n_users": 0,
+            "n_users_total": n_users_total or 0,
             "is_multi_tenant": False,
             "max_hit_rate": 0.0,
             "min_hit_rate": 0.0,
@@ -361,6 +511,10 @@ def compute_model_context(
             "unique_rpm_avg": 0.0,
             "total_unique_blocks_topk": 0,
             "trace_duration_minutes": 0.0,
+            "trace_duration_caveat": "no selected users",
+            "ts_parse_failed_count": ts_parse_failed_count,
+            "requests_per_min_q": requests_per_min_q or {},
+            "new_unique_blocks_per_sec_q": new_unique_blocks_per_sec_q or {},
             "traffic_spikes": traffic_spikes or [],
             "spike_config": spike_config or {},
             "model_params_class": None,
@@ -412,8 +566,20 @@ def compute_model_context(
     rpm_avg = total_requests / duration_min if duration_min else 0.0
     unique_rpm_avg = total_unique_topk / duration_min if duration_min else 0.0
 
+    # v3: trace_duration_caveat — flag rpm_avg=0/unique_rpm_avg=0 root cause
+    caveat = None
+    if duration_sec == 0:
+        if not earliest_list or not latest_list:
+            caveat = "no valid timestamps in any selected user (all ts parse failed?)"
+        else:
+            caveat = "trace_duration = 0 (earliest_ts == latest_ts); rpm/unique_rpm 不可靠"
+    elif ts_parse_failed_count > 0:
+        caveat = f"{ts_parse_failed_count} timestamp(s) failed to parse (fallback to 0); rpm/unique_rpm 可能偏低"
+
     return {
         "n_users": n_users,
+        # v3: n_users_total = 全模型 user 数 (from pass-1 collect_user_counts)
+        "n_users_total": n_users_total if n_users_total is not None else n_users,
         # Multi-tenant when ≥3 users share the model (1-2 users still has
         # cross-user driver but doesn't justify a router layer)
         "is_multi_tenant": n_users >= 3,
@@ -433,6 +599,12 @@ def compute_model_context(
         "unique_rpm_avg":   round(unique_rpm_avg, 4),
         "total_unique_blocks_topk": total_unique_topk,
         "trace_duration_minutes": round(duration_min, 2),
+        # v3: bug-diagnostic fields
+        "trace_duration_caveat": caveat,
+        "ts_parse_failed_count": ts_parse_failed_count,
+        # v3: model-level quantile (for HTML reference lines + user vs model 对比)
+        "requests_per_min_q": requests_per_min_q or {},
+        "new_unique_blocks_per_sec_q": new_unique_blocks_per_sec_q or {},
         # Traffic spike detection (filled by main from detect_traffic_spikes)
         "traffic_spikes":   traffic_spikes or [],
         "spike_config":     spike_config or {},
@@ -759,7 +931,13 @@ def compute_step3_recommendation(
         "c_subtype":          c_subtype,
         "classifications":    classifications,
         "is_anomaly":         is_anomaly,
-        "_note": "see docs/step3_algorithm_decision_matrix.md §9.2 for v2 rules",
+        # v3 §9: recommended queue count (B(2) 多队列 LRU 实施提示)
+        # Count chains with cov >= 10% — these are 维护成本划算 的 chain。
+        "recommended_queue_count": sum(
+            1 for c in chains if (c.get("coverage_pct") or 0) >= 10.0
+        ),
+        "_note": "see docs/step3_algorithm_decision_matrix.md §9.2 for v2 rules; "
+                 "see docs/user_report_html_redesign.md §9 for queue count rule",
     }
 
 
@@ -831,9 +1009,18 @@ def analyze_user(
     earliest_ts: int | None = None
     latest_ts: int | None = None
 
+    # v3 §6: reuse_time tracking (block 维度复用间隔)
+    last_seen_ts: dict[bytes, int] = {}
+    reuse_times: list[int] = []
+
+    # v3 §4: user-level traffic_spike bucket (5min window by default)
+    user_req_per_window: dict[int, int] = defaultdict(int)
+    spike_bucket_secs = args.spike_window_min * 60
+
     for rid, ts, prompt in records:
         prompts_by_rid[rid] = prompt
         req_per_min[ts // 60] += 1
+        user_req_per_window[ts // spike_bucket_secs] += 1
         if earliest_ts is None:
             earliest_ts = ts
         latest_ts = ts
@@ -862,6 +1049,14 @@ def analyze_user(
                 break
         hit_blocks += lcp
         per_request_lcp.append(lcp)
+
+        # v3 §6: reuse_time — for every key seen before, record gap since last_seen_ts.
+        # Done before marking new blocks (so a fresh block doesn't generate a 0 gap).
+        for k in keys:
+            prev_seen = last_seen_ts.get(k)
+            if prev_seen is not None:
+                reuse_times.append(ts - prev_seen)
+            last_seen_ts[k] = ts
 
         # Mark new blocks
         for k in keys:
@@ -920,8 +1115,19 @@ def analyze_user(
         running += entry["count"]
         cumulative_unique.append({"second": entry["second"], "total": running})
 
-    # LCP histogram
-    histogram, lcp_quantiles = lcp_histogram(per_request_lcp)
+    # LCP histogram (v3: tuple now (hist, quantiles, top10))
+    histogram, lcp_quantiles, lcp_top10 = lcp_histogram(per_request_lcp)
+
+    # v3 §6: reuse_time quantile + CDF points
+    reuse_time_q = _reuse_time_quantiles(reuse_times)
+    reuse_time_cdf = _reuse_time_cdf_log(reuse_times, n_points=50)
+
+    # v3 §4: user-level traffic_spikes (复用 detect_traffic_spikes)
+    user_traffic_spikes = detect_traffic_spikes(
+        user_req_per_window,
+        threshold_multiplier=args.spike_threshold,
+        window_minutes=args.spike_window_min,
+    )
 
     # Chain forest
     t1 = time.time()
@@ -1002,9 +1208,15 @@ def analyze_user(
         "inter_arrival_gaps_seconds":   gap_q,
         "new_unique_blocks_per_sec_q":  new_q,
         "lcp_distribution": {
-            "quantiles":  lcp_quantiles,
-            "histogram":  histogram,
+            "quantiles":         lcp_quantiles,    # v3: now has p30 + p80
+            "histogram":         histogram,
+            "top10_lcp_values":  lcp_top10,        # v3 §7
         },
+        # v3 §6 reuse_time CDF
+        "reuse_time_quantiles":  reuse_time_q,
+        "reuse_time_cdf_points": reuse_time_cdf,
+        # v3 §4 user-level traffic spikes (model-level is in model_report.json)
+        "user_traffic_spikes": user_traffic_spikes,
         "time_series": {
             "requests_per_minute":          req_per_min_series,
             "new_unique_blocks_per_second": new_per_sec_series,
@@ -1160,6 +1372,11 @@ def parse_args() -> argparse.Namespace:
                    help="unique_share_band high threshold (default 0.30)")
     p.add_argument("--chain-count-many",  type=int,   default=DEFAULT_CHAIN_COUNT_MANY,
                    help="chain_count_band many threshold (default 3)")
+    # v3 §8: chain shadow detection thresholds
+    p.add_argument("--shadow-min-shared", type=int,   default=5,
+                   help="chain_shadow_pairs: min shared prefix blocks (default 5)")
+    p.add_argument("--shadow-min-ratio",  type=float, default=0.30,
+                   help="chain_shadow_pairs: min ratio of either chain (default 0.30)")
     return p.parse_args()
 
 
@@ -1172,9 +1389,10 @@ def main() -> None:
         sys.exit(1)
     print(f"Input: {len(csv_files)} CSV file(s) under {args.raw_csv}", flush=True)
 
-    # Pass 1: counts + req_per_5min for spike detection
+    # Pass 1: counts + req_per_5min for spike detection + model-level time-series
     t_pass1 = time.time()
-    counts, total, req_per_window = collect_user_counts(
+    (counts, total, req_per_window, model_req_per_min,
+     ts_parse_failed, earliest_ts_all, latest_ts_all) = collect_user_counts(
         csv_files, window_minutes=args.spike_window_min,
     )
     spikes = detect_traffic_spikes(
@@ -1189,6 +1407,15 @@ def main() -> None:
         f"({time.time()-t_pass1:.1f}s)",
         flush=True,
     )
+    if ts_parse_failed > 0:
+        print(
+            f"  ⚠️  {ts_parse_failed:,} row(s) had unparseable timestamps "
+            f"(fallback to 0). rpm/unique_rpm 可能偏低。",
+            flush=True,
+        )
+
+    # v3 §4 / §1: 模型层 req_per_min quantile (padded to full trace minutes)
+    n_users_total = len(counts)   # 全模型 user 数 (不只 Top-K)
 
     selected, excluded = select_users(
         counts, total, args.top_k_users, args.min_request_pct,
@@ -1248,8 +1475,58 @@ def main() -> None:
         "window_minutes":       args.spike_window_min,
         "threshold_multiplier": args.spike_threshold,
     }
+
+    # v3 §1: model-level quantile (req/min + new_block/s). 含 0 桶 padding.
+    # req/min uses ALL users (model_req_per_min from pass-1, accurate).
+    # new_block/s sums Top-K user new_per_sec_series (近似, long-tail user 不计).
+    def _padded_quantile(values: list[int], total_buckets: int) -> dict:
+        """Quantile over values list, padded with zeros to total_buckets."""
+        sorted_vals = sorted(values)
+        denom = max(total_buckets, len(sorted_vals)) or 1
+        n_zeros = max(0, denom - len(sorted_vals))
+        sum_v = sum(sorted_vals)
+
+        def _q(pct: float) -> int:
+            idx = (denom - 1) * pct / 100.0
+            lo = int(idx)
+            if lo < n_zeros:
+                return 0
+            return sorted_vals[lo - n_zeros] if sorted_vals else 0
+
+        return {
+            "avg": round(sum_v / denom, 4) if denom else 0.0,
+            "p50": _q(50), "p80": _q(80), "p95": _q(95),
+            "max": sorted_vals[-1] if sorted_vals else 0,
+        }
+
+    # Model-level trace span buckets (含 0)
+    if latest_ts_all >= earliest_ts_all and latest_ts_all > 0:
+        model_total_minutes = (latest_ts_all // 60) - (earliest_ts_all // 60) + 1
+        model_total_seconds = latest_ts_all - earliest_ts_all + 1
+    else:
+        model_total_minutes = 1
+        model_total_seconds = 1
+
+    # req/min quantile: pass-1 model_req_per_min covers all users
+    model_req_per_min_q = _padded_quantile(
+        list(model_req_per_min.values()), model_total_minutes,
+    )
+
+    # new_block/s quantile: sum across Top-K selected users (per-second)
+    model_new_per_sec_combined: dict[int, int] = defaultdict(int)
+    for uid in selected:
+        for entry in user_reports[uid]["time_series"]["new_unique_blocks_per_second"]:
+            model_new_per_sec_combined[entry["second"]] += entry["count"]
+    model_new_per_sec_q = _padded_quantile(
+        list(model_new_per_sec_combined.values()), model_total_seconds,
+    )
+
     model_context = compute_model_context(
         user_reports, traffic_spikes=spikes, spike_config=spike_config,
+        n_users_total=n_users_total,
+        ts_parse_failed_count=ts_parse_failed,
+        requests_per_min_q=model_req_per_min_q,
+        new_unique_blocks_per_sec_q=model_new_per_sec_q,
     )
 
     # Back-fill share_of_model_unique into each user's stats
@@ -1291,6 +1568,12 @@ def main() -> None:
             report["stats"], report["chain_forest_summary"], thresholds,
         )
         report["classifications"] = classifications
+        # v3 §8: chain_shadow_pairs (chain 间前缀重合检测, 提示 chain 数虚高)
+        report["chain_shadow_pairs"] = _compute_chain_shadow_pairs(
+            forest["chains"],
+            min_shared=args.shadow_min_shared,
+            min_ratio=args.shadow_min_ratio,
+        )
         report["step3_recommendation"] = compute_step3_recommendation(
             report["stats"],
             forest["chains"],
