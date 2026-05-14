@@ -57,14 +57,53 @@ csv.field_size_limit(sys.maxsize)
 SWEEP_THRESHOLDS = [round(i * 0.05, 2) for i in range(21)]  # 0.00 → 1.00 step 0.05
 
 
-def quantile_summary(values: list[int]) -> dict:
-    """Return {avg, p50, p80, p95, max} for a list of ints."""
-    if not values:
+def quantile_summary(values: list[int], total_count: Optional[int] = None) -> dict:
+    """Return {avg, p50, p80, p95, max} over a (possibly sparse) bucket series.
+
+    `values` is the list of *non-zero* bucket counts (e.g., new_unique_per_sec
+    dict values — only seconds with ≥ 1 new block).
+
+    `total_count` is the number of buckets we *should* be observing (e.g.,
+    trace_duration_seconds for a per-second metric). If total_count > len(values),
+    the missing buckets are treated as zero — this matches the intuitive
+    "瞬时压力分位数" reading: "95% of all seconds have ≤ X blocks/s".
+
+    Without total_count, falls back to len(values) — that means quantiles are
+    over *non-zero* buckets only (legacy behavior, will overstate spike-y series).
+    """
+    if not values and not total_count:
         return {"avg": 0.0, "p50": 0, "p80": 0, "p95": 0, "max": 0}
+
     sorted_vals = sorted(values)
+    if total_count is not None and total_count > len(sorted_vals):
+        # Pad zero buckets in front (already sorted: 0s come first)
+        n_zeros = total_count - len(sorted_vals)
+        denom = total_count
+        sum_vals = sum(sorted_vals)  # zeros contribute 0
+        # Combined sorted list: [0]*n_zeros + sorted_vals
+        # For percentile: index = pct/100 × (denom-1)
+        def quant_at(pct: float) -> int:
+            if denom == 0:
+                return 0
+            idx = (denom - 1) * pct / 100.0
+            lo = int(idx)
+            if lo < n_zeros:
+                return 0
+            return sorted_vals[lo - n_zeros]
+        return {
+            "avg": round(sum_vals / denom, 4),
+            "p50": quant_at(50),
+            "p80": quant_at(80),
+            "p95": quant_at(95),
+            "max": sorted_vals[-1] if sorted_vals else 0,
+        }
+
+    # Fallback: legacy non-zero quantile (also used if values fully populate total_count)
+    if not sorted_vals:
+        return {"avg": 0.0, "p50": 0, "p80": 0, "p95": 0, "max": 0}
     avg = sum(sorted_vals) / len(sorted_vals)
     return {
-        "avg": round(avg, 2),
+        "avg": round(avg, 4),
         "p50": percentile_int(sorted_vals, 50),
         "p80": percentile_int(sorted_vals, 80),
         "p95": percentile_int(sorted_vals, 95),
@@ -473,8 +512,27 @@ def main() -> None:
         running += entry["count"]
         cumulative_unique.append({"second": entry["second"], "total": running})
 
-    req_per_min_q = quantile_summary([m["count"] for m in req_per_min_series])
-    new_per_sec_q = quantile_summary([s["count"] for s in new_per_sec_series])
+    # v2 fix (2026-05-14): pad zero-buckets so quantiles reflect the full trace,
+    # not only the seconds/minutes that happened to have new blocks. Otherwise
+    # a sparse trace (e.g., 15 active seconds out of 335) inflates p50/p80/p95
+    # because the (300+) zero seconds are missing from the input series.
+    total_seconds = 0
+    total_minutes = 0
+    if earliest_ts is not None and latest_ts is not None and latest_ts >= earliest_ts:
+        total_seconds = max(latest_ts - earliest_ts + 1, len(new_per_sec_series))
+        total_minutes = max(
+            (latest_ts // 60) - (earliest_ts // 60) + 1,
+            len(req_per_min_series),
+        )
+
+    req_per_min_q = quantile_summary(
+        [m["count"] for m in req_per_min_series],
+        total_count=total_minutes,
+    )
+    new_per_sec_q = quantile_summary(
+        [s["count"] for s in new_per_sec_series],
+        total_count=total_seconds,
+    )
 
     output = {
         "input": str(args.raw_csv),

@@ -881,11 +881,29 @@ def analyze_user(
         "max": sorted_gaps[-1] if sorted_gaps else 0,
     }
 
-    # New-block/s quantiles (over seconds that had at least one new block)
+    # New-block/s quantiles — over FULL trace (padding zero seconds).
+    # Without padding, sparse traces (e.g., 15 active seconds out of 335)
+    # inflate p50/p95 because we'd be quantiling over non-zero seconds only.
+    # v2 fix (2026-05-14): use trace span to pad.
     new_per_sec_vals = sorted(new_per_sec.values())
+    if earliest_ts is not None and latest_ts is not None and latest_ts >= earliest_ts:
+        total_seconds = max(latest_ts - earliest_ts + 1, len(new_per_sec_vals))
+    else:
+        total_seconds = len(new_per_sec_vals)
+    n_zeros = max(0, total_seconds - len(new_per_sec_vals))
+
+    def _padded_quant(pct: float) -> int:
+        if total_seconds == 0:
+            return 0
+        idx = (total_seconds - 1) * pct / 100.0
+        lo = int(idx)
+        if lo < n_zeros:
+            return 0
+        return new_per_sec_vals[lo - n_zeros] if new_per_sec_vals else 0
+
     new_q = {
-        "p50": percentile_int(new_per_sec_vals, 50),
-        "p95": percentile_int(new_per_sec_vals, 95),
+        "p50": _padded_quant(50),
+        "p95": _padded_quant(95),
         "max": new_per_sec_vals[-1] if new_per_sec_vals else 0,
     }
 
