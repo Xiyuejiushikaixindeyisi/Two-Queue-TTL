@@ -43,8 +43,33 @@ from verify_chain_path_closure import (  # noqa: E402
     split_blocks,
     trie_insert,
 )
+# Reuse Step 1.5 v2 metrics (spike detection + percentile)
+from per_user_report_analyzer import (  # noqa: E402
+    DEFAULT_SPIKE_WINDOW_MIN,
+    DEFAULT_SPIKE_THRESHOLD,
+    detect_traffic_spikes,
+    percentile_int,
+)
 
 csv.field_size_limit(sys.maxsize)
+
+# v2 threshold sweep config (per_user_chains_html_redesign.md §5.7)
+SWEEP_THRESHOLDS = [round(i * 0.05, 2) for i in range(21)]  # 0.00 → 1.00 step 0.05
+
+
+def quantile_summary(values: list[int]) -> dict:
+    """Return {avg, p50, p80, p95, max} for a list of ints."""
+    if not values:
+        return {"avg": 0.0, "p50": 0, "p80": 0, "p95": 0, "max": 0}
+    sorted_vals = sorted(values)
+    avg = sum(sorted_vals) / len(sorted_vals)
+    return {
+        "avg": round(avg, 2),
+        "p50": percentile_int(sorted_vals, 50),
+        "p80": percentile_int(sorted_vals, 80),
+        "p95": percentile_int(sorted_vals, 95),
+        "max": sorted_vals[-1],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +140,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--block-size", type=int, default=128)
     p.add_argument("--max-decoded-blocks", type=int, default=None,
                    help="Cap decoded blocks per chain (default: full chain)")
+    # v2 (per_user_chains_html_redesign.md): spike detection config
+    p.add_argument("--spike-window-min", type=int, default=DEFAULT_SPIKE_WINDOW_MIN,
+                   help="Spike detection window in minutes (default: 5)")
+    p.add_argument("--spike-threshold", type=float, default=DEFAULT_SPIKE_THRESHOLD,
+                   help="Spike trigger multiplier: bucket[i]/bucket[i-1] (default: 5.0)")
+    p.add_argument("--no-threshold-sweep", action="store_true",
+                   help="Skip 21-point threshold sweep (default: run sweep)")
     return p.parse_args()
 
 
@@ -127,7 +159,7 @@ def main() -> None:
         sys.exit(1)
     print(f"Input: {len(csv_files)} CSV file(s) under {args.raw_csv}", flush=True)
 
-    # ---- Phase 1: build global trie + per-user tries in one pass ----
+    # ---- Phase 1: build global trie + per-user tries + v2 metrics in one pass ----
     t0 = time.time()
     global_root = TrieNode()
     user_roots: dict[str, TrieNode] = defaultdict(TrieNode)
@@ -136,9 +168,33 @@ def main() -> None:
     n_blocks_total = 0
     n_empty = 0
 
-    for request_id, user_id, raw_prompt, _ts in iter_raw_records(csv_files):
+    # v2 metrics accumulators (single-pass)
+    global_seen_keys: set[bytes] = set()
+    user_seen_keys: dict[str, set[bytes]] = defaultdict(set)
+    user_hit_blocks: dict[str, int] = defaultdict(int)
+    user_total_blocks: dict[str, int] = defaultdict(int)
+    global_hit_blocks = 0
+    new_unique_per_sec: dict[int, int] = defaultdict(int)
+    req_per_min: dict[int, int] = defaultdict(int)
+    req_per_window: dict[int, int] = defaultdict(int)   # for spike detection
+    earliest_ts: Optional[int] = None
+    latest_ts: Optional[int] = None
+    spike_bucket_secs = args.spike_window_min * 60
+
+    for request_id, user_id, raw_prompt, ts in iter_raw_records(csv_files):
         n_total += 1
         user_request_count[user_id] += 1
+
+        # Parse timestamp (str → int seconds, floor)
+        try:
+            ts_int = int(float(ts))
+        except (ValueError, TypeError):
+            ts_int = 0
+        if earliest_ts is None:
+            earliest_ts = ts_int
+        latest_ts = ts_int
+        req_per_min[ts_int // 60] += 1
+        req_per_window[ts_int // spike_bucket_secs] += 1
 
         if not raw_prompt:
             n_empty += 1
@@ -149,6 +205,34 @@ def main() -> None:
         blocks = split_blocks(raw_prompt, args.block_size)
         keys = compute_prefix_path_keys(blocks)
         n_blocks_total += len(keys)
+        user_total_blocks[user_id] += len(keys)
+
+        # v2: compute global LCP (cumulative hit count for ideal_hit_rate_aggregate)
+        # hash-chain property: key_i seen ⟹ key_0..key_{i-1} all seen → single scan
+        g_lcp = 0
+        for k in keys:
+            if k in global_seen_keys:
+                g_lcp += 1
+            else:
+                break
+        global_hit_blocks += g_lcp
+
+        # v2: compute per-user LCP (user-internal ideal_hit_rate)
+        u_seen = user_seen_keys[user_id]
+        u_lcp = 0
+        for k in keys:
+            if k in u_seen:
+                u_lcp += 1
+            else:
+                break
+        user_hit_blocks[user_id] += u_lcp
+
+        # v2: track new global unique blocks (for new_unique_blocks_per_second)
+        for k in keys:
+            if k not in global_seen_keys:
+                global_seen_keys.add(k)
+                new_unique_per_sec[ts_int] += 1
+            u_seen.add(k)
 
         trie_insert(global_root, keys, request_id)
         trie_insert(user_roots[user_id], keys, request_id)
@@ -163,6 +247,39 @@ def main() -> None:
         f"(empty prompts: {n_empty})",
         flush=True,
     )
+
+    # v2: compute derived metrics
+    ideal_hit_rate_aggregate = (
+        global_hit_blocks / n_blocks_total if n_blocks_total else 0.0
+    )
+    trace_duration_seconds = (
+        (latest_ts or 0) - (earliest_ts or 0) if (earliest_ts and latest_ts) else 0
+    )
+    trace_duration_minutes = trace_duration_seconds / 60.0 if trace_duration_seconds else 0.0
+    print(
+        f"v2 metrics: ideal_hit_rate_aggregate={ideal_hit_rate_aggregate:.4f}, "
+        f"trace_duration={trace_duration_minutes:.1f} min, "
+        f"global_unique={len(global_seen_keys):,}",
+        flush=True,
+    )
+
+    # v2: detect traffic spikes (5 min × 5× by default)
+    traffic_spikes = detect_traffic_spikes(
+        req_per_window,
+        threshold_multiplier=args.spike_threshold,
+        window_minutes=args.spike_window_min,
+    )
+    if traffic_spikes:
+        print(
+            f"v2 metrics: {len(traffic_spikes)} traffic spike(s) detected "
+            f"at ≥ {args.spike_threshold}× over {args.spike_window_min}min windows",
+            flush=True,
+        )
+    else:
+        print(
+            f"v2 metrics: no ≥{args.spike_threshold}× spike (window={args.spike_window_min} min)",
+            flush=True,
+        )
 
     # ---- Phase 2: find LCP for global + each user ----
     t1 = time.time()
@@ -225,6 +342,26 @@ def main() -> None:
         flush=True,
     )
 
+    # ---- Phase 2.5: threshold sweep (v2, per_user_chains_html_redesign.md §5.7) ----
+    # Re-run find_lcp at 21 different branch_thresholds to produce the sweep curve.
+    # Trie is already built; this is fast (just walks max-child each time).
+    threshold_sweep_points = []
+    if not args.no_threshold_sweep:
+        t_sweep = time.time()
+        for thr in SWEEP_THRESHOLDS:
+            sweep_chain, _ = find_lcp(
+                global_root, thr, args.coverage_threshold,
+            )
+            threshold_sweep_points.append({
+                "threshold":    thr,
+                "chain_length": len(sweep_chain),
+            })
+        print(
+            f"Threshold sweep: 21 points (0.00 → 1.00 step 0.05)  "
+            f"({time.time()-t_sweep:.2f}s)",
+            flush=True,
+        )
+
     # ---- Phase 3: batch decode all needed chain contents in one CSV pass ----
     t2 = time.time()
     decoded_map = batch_decode(csv_files, decode_request_ids, args.block_size)
@@ -259,9 +396,18 @@ def main() -> None:
         sample_id = u["_sample_request_id"]
         decoded = decoded_map.get(sample_id, []) if sample_id else []
 
+        # v2: per-user hit_rate + request_pct (§9.2.2 用户偏斜表用)
+        u_total = user_total_blocks[uid]
+        u_hit_rate = user_hit_blocks[uid] / u_total if u_total else 0.0
+        u_req_pct = rcount / n_total * 100 if n_total else 0.0
+
         users_out.append({
             "user_id": uid,
             "request_count": rcount,
+            "request_pct": round(u_req_pct, 3),                    # v2
+            "ideal_hit_rate": round(u_hit_rate, 6),                # v2
+            "total_blocks": u_total,                               # v2
+            "hit_blocks": user_hit_blocks[uid],                    # v2
             "chain_length": len(chain_keys),
             "chain_coverage_count": chain_counts[-1] if chain_counts else 0,
             "chain_coverage_pct": (
@@ -273,6 +419,27 @@ def main() -> None:
             "lcp_content": build_lcp_content(chain_keys, chain_counts, rcount, decoded),
             "branch_points": u["_branch_points"],
         })
+
+    # v2: reuse_inversion_ratio + max/min hit user (per_user_chains_html_redesign §5.2)
+    if users_out:
+        hit_rates = [(u["user_id"], u["ideal_hit_rate"]) for u in users_out]
+        max_hit_uid, max_hit = max(hit_rates, key=lambda kv: kv[1])
+        min_hit_uid, min_hit = min(hit_rates, key=lambda kv: kv[1])
+        if min_hit > 0:
+            inv_ratio_raw = max_hit / min_hit
+            inv_ratio = round(inv_ratio_raw, 2)
+            inv = inv_ratio_raw >= 2.0
+        elif max_hit > 0:
+            inv_ratio = "inf (min hit_rate = 0)"
+            inv = True
+        else:
+            inv_ratio = 1.0
+            inv = False
+    else:
+        max_hit_uid = min_hit_uid = None
+        max_hit = min_hit = 0.0
+        inv_ratio = 1.0
+        inv = False
 
     # User aggregate stats
     n_users = len(users_out)
@@ -292,6 +459,23 @@ def main() -> None:
     global_decoded = decoded_map.get(global_sample_id, []) if global_sample_id else []
     global_counts = [c for _, c in global_chain]
 
+    # v2: build time_series + quantile dicts
+    req_per_min_series = [
+        {"minute": m, "count": req_per_min[m]} for m in sorted(req_per_min)
+    ]
+    new_per_sec_series = [
+        {"second": s, "count": new_unique_per_sec[s]}
+        for s in sorted(new_unique_per_sec)
+    ]
+    cumulative_unique: list[dict] = []
+    running = 0
+    for entry in new_per_sec_series:
+        running += entry["count"]
+        cumulative_unique.append({"second": entry["second"], "total": running})
+
+    req_per_min_q = quantile_summary([m["count"] for m in req_per_min_series])
+    new_per_sec_q = quantile_summary([s["count"] for s in new_per_sec_series])
+
     output = {
         "input": str(args.raw_csv),
         "input_files": [str(p) for p in csv_files],
@@ -306,6 +490,14 @@ def main() -> None:
             "total_blocks": n_blocks_total,
             "empty_prompts": n_empty,
             "build_seconds": round(build_s, 2),
+            # v2 metrics
+            "ideal_hit_rate_aggregate": round(ideal_hit_rate_aggregate, 6),
+            "global_hit_blocks": global_hit_blocks,
+            "global_unique_blocks": len(global_seen_keys),
+            "trace_duration_seconds": trace_duration_seconds,
+            "trace_duration_minutes": round(trace_duration_minutes, 2),
+            "earliest_timestamp": earliest_ts,
+            "latest_timestamp": latest_ts,
         },
         "user_aggregate": {
             "users_with_chain": n_with_chain,
@@ -314,6 +506,29 @@ def main() -> None:
             "users_matching_global_50pct_prefix": n_match_50pct,
             "users_with_unique_chain": n_unique_chain,
         },
+        # v2: reuse_inversion signals (top-level, per_user_chains_html_redesign §5.2)
+        "reuse_inversion_ratio": inv_ratio,
+        "reuse_inversion":       inv,
+        "max_hit_user":          max_hit_uid,
+        "min_hit_user":          min_hit_uid,
+        "max_hit_rate":          round(max_hit, 4),
+        "min_hit_rate":          round(min_hit, 4),
+        # v2: time series + quantile (§5.3 / §5.5 / §5.6)
+        "time_series": {
+            "requests_per_minute":          req_per_min_series,
+            "new_unique_blocks_per_second": new_per_sec_series,
+            "cumulative_unique_blocks":     cumulative_unique,
+        },
+        "requests_per_min_q":          req_per_min_q,
+        "new_unique_blocks_per_sec_q": new_per_sec_q,
+        # v2: traffic spikes (§5.4)
+        "traffic_spikes": traffic_spikes,
+        "spike_config": {
+            "window_minutes":       args.spike_window_min,
+            "threshold_multiplier": args.spike_threshold,
+        },
+        # v2: threshold sweep (§5.7)
+        "threshold_sweep_points": threshold_sweep_points,
         "global_chain": {
             "chain_length": len(global_chain),
             "chain_coverage_count": global_counts[-1] if global_counts else 0,
@@ -337,6 +552,28 @@ def main() -> None:
     print("\n=== Result ===", flush=True)
     print(f"  total requests       : {n_total:,}", flush=True)
     print(f"  total users          : {n_users}", flush=True)
+    print(f"  ideal_hit_rate_aggr  : {ideal_hit_rate_aggregate:.4f}", flush=True)
+    print(
+        f"  reuse_inversion      : ratio={inv_ratio}  "
+        f"max=({max_hit_uid}, {max_hit:.4f})  min=({min_hit_uid}, {min_hit:.4f})",
+        flush=True,
+    )
+    print(
+        f"  req/min quantile     : "
+        f"avg={req_per_min_q['avg']} p50={req_per_min_q['p50']} "
+        f"p80={req_per_min_q['p80']} p95={req_per_min_q['p95']} "
+        f"max={req_per_min_q['max']}",
+        flush=True,
+    )
+    print(
+        f"  new_block/s quantile : "
+        f"avg={new_per_sec_q['avg']} p50={new_per_sec_q['p50']} "
+        f"p80={new_per_sec_q['p80']} p95={new_per_sec_q['p95']} "
+        f"max={new_per_sec_q['max']}",
+        flush=True,
+    )
+    print(f"  traffic spikes       : {len(traffic_spikes)}", flush=True)
+    print(f"  threshold sweep      : {len(threshold_sweep_points)} points", flush=True)
     print(f"  global chain length  : {len(global_chain)}", flush=True)
     if global_chain:
         cov = global_counts[-1] / n_total * 100
