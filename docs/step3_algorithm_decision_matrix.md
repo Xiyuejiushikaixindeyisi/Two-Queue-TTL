@@ -1,7 +1,8 @@
 # Step 3 算法决策矩阵 — 5 维评估 × 4 算法选择
 
 > **创建时间：** 2026-05-12
-> **最近修订：** 2026-05-13（A/B 子类型 framework + llm-d baseline 重新校准 + §4.6 21 user 细化表 + §9.2 v2 工具 spec）
+> **最近修订：** 2026-05-14（§9.2.8 补 9 模型实测偏差 + §9.2.9 修订追踪 + 链接 step2_experiment_priorities.md）
+> **上一版本：** 2026-05-13（A/B 子类型 framework + llm-d baseline 重新校准 + §4.6 21 user 细化表 + §9.2 v2 工具 spec）
 > **上游数据：** [`docs/model_portraits.md`](model_portraits.md)（7 模型 21 用户 chain forest 实测）
 > **上游设计：** [`docs/3step_validation_plan.md`](3step_validation_plan.md) §3 Step 2 / §4 Step 3
 > **适用场景：** 每个 user 选择 Step 3 算法路径的入口文档
@@ -597,6 +598,57 @@ python3 scripts/v2_run_pipeline.py --analyzer-extra='--spike-threshold 3.0'
 3. 单 chain 高 cov 但 unique_share 中等的 user（如 Qwen-64K supply/chipset2）— A(2) 触发需要 chain_count ≥ 3 + unique_share ≥ 30%，supply/chipset2 总流量 3% + 1.6% unique_share 可能不到 30%，会落 A0
 
 实测结果与上述偏差一致 → 规则正确；不一致 → 排查阈值或规则错误，编辑 §9.2.8 续写实际偏差日志。
+
+---
+
+**2026-05-14 9 模型实测后实际偏差**（来自 `outputs/v2_4dim_summary.md`，9 模型 21 user）：
+
+跑出来与预期不符的 3 处：
+
+#### 偏差 1: GLM-V5.1 tianzhou.ai
+
+| 维度 | 值 |
+|---|---|
+| 预期（§9.2.5）| **A(4) 暂缓** |
+| 实测产出 | **A(2) 多 chain 实例化** |
+| user 数据 | hit 0.94 / 7 chain × dom_len 156-377 / cov 14.7% / 单租户 |
+| 偏差原因 | `model_params_class` 字段未填（HTML §0 显示"缺失"红底警告） → A(4) 规则首先匹配 `params_class == "large_200B_moe"`，未填则跳过该规则，落到 A(2) 多 chain 实例化（n_users ≤ 3 + chain_count_band == many） |
+| 修复方式 | **不需改代码**。编辑 `outputs/GLM-V5.1/per_user_reports/model_report.json`，补：<br>`"model_params_class": "large_200B_moe"`<br>`"instance_count": ...`（按实际部署）<br>`"cache_capacity_blocks": ...`<br>然后跑 `python3 scripts/v2_run_pipeline.py --skip-analyzer`（重跑 renderer 即可，人工补字段会保留，详见 §9.2.7 第 5 条）|
+| 修复后预期 | A(4) 暂缓 + B(2) 多队列（n_users == 1 + chain_count_band == many）+ C(2) |
+
+#### 偏差 2: Qwen-V3.5-27B-64K supply.ioc.rock / chipset2
+
+| 维度 | 值 |
+|---|---|
+| 预期（§9.2.5）| **A(2) 多 chain 实例化** |
+| 实测产出 | **A0 baseline (llm-d prefix_score)** |
+| user 数据 | supply: hit 0.74 / 10 chain dom_len 380-1374 / share 4.1%；chipset2: hit 0.92 / 7 chain dom_len 1172-1802 / share 0.8% |
+| 偏差原因 | A(2) 触发要求 `unique_share_band == "high"`（≥ 30%），但 supply 仅 4.1%、chipset2 仅 0.8% — share 未达 30% 阈值 → 落 A0 |
+| 判断 | **实测 A0 是正确的**。spec §9.2.5 预期"A(2)"基于"流量大且 chain 多长"的假设，但 supply/chipset2 实际是 **long-tail 低流量 user**（占模型流量 < 5%），同实例上 Qwen-64K S773（95% 流量）才是 cache 占用大头。<br>A(2) 多 chain 实例化的语义是"独立实例承载多 chain"，但 supply/chipset2 流量太小，不值得专门隔离 |
+| 修订方向 | **修订 §9.2.5**：将 supply / chipset2 的预期改为 A0 baseline + A1 chain affinity（如果 chain 数稳定的话），保留多 chain B(2) 推荐 |
+
+#### 偏差 3: Qwen-V3-8B-8K S773
+
+| 维度 | 值 |
+|---|---|
+| 预期（§9.2.5）| **D 业务侧重写** |
+| 实测产出 | **A0 + B(1) + C(1) 强池化** |
+| user 数据 | hit 0.17 / unique 1.15M / 100% 流量 / chain 1 短 14 cov 5.9% / P80 new_block/s 249 |
+| 偏差原因 | D 触发要求 `business_ceiling_low = hit < 0.30 AND pin_uplift < 5pp`。pin_uplift = `top_cov × (1−hit) × 100` = 5.9% × 0.83 × 100 = **4.9 pp**（恰好 < 5pp 边界）→ business_ceiling_low 应触发 D，但单租户 + chain_count_band == "few" 让 C(1) 触发优先（c_subtype 检测 unique_share == high + B(1)）|
+| 判断 | **A0 + C(1) 表面合理但语义偏离**。该 user hit 0.17 + chain cov 5.9%，pin 上界 4.9pp ≈ 上限就这点 → 主菜应该是 **D 业务侧改写**，C(1) 池化对 hit 0.17 的 user 几乎无收益（hit 上界 = ideal_hit_rate = 0.17，池化最多让 hit 接近 0.17）|
+| 修订方向 | **修订 §3 主菜规则**：加边界条件 `hit < 0.20 AND unique > 1M → 强制 D 主菜`（C 不能救业务上限）。或将 business_ceiling_low 阈值从 5pp 放宽到 6pp |
+
+---
+
+### 9.2.9 修订追踪（待编辑）
+
+实测偏差对应的工具/规则修订：
+
+- [ ] §9.2.5 修订 Qwen-64K supply/chipset2 行：A(2) → A0 + A1
+- [ ] §3 主菜规则加边界条件：`hit < 0.20 AND unique > 1M → 强制 D`
+- [ ] 工具说明加：**`model_params_class` 未补时，A(4) 规则永远跳过 → 大模型可能被误判为 A(2)**，HTML §0 现有红底"缺失"警告已经提示此点（无需改代码）
+
+详细 Step 2 实验排期见 [`step2_experiment_priorities.md`](step2_experiment_priorities.md)。
 
 ---
 
