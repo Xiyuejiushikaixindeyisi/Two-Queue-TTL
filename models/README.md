@@ -1,47 +1,67 @@
 # models/
 
-Vendored tokenizer files for offline / air-gapped deployment.
+Vendored HuggingFace tokenizer files for offline / air-gapped deployment.
 
-## `models/glm5_tokenizer/`
-
-GLM-5 tokenizer assets, snapshotted from
-[`huggingface.co/zai-org/GLM-5`](https://huggingface.co/zai-org/GLM-5) (MIT license).
-
-| File | Size | Purpose |
-|---|---|---|
-| `tokenizer.json` | 20 MB | BPE merges + vocab (vocab_size = 154820) |
-| `tokenizer_config.json` | 760 B | Special tokens + `tokenizer_class=TokenizersBackend` |
-| `chat_template.jinja` | 3 KB | GLM-5 chat template (含 thinking 模式 `<think>` tag) |
-
-Origin: HF API metadata snapshot of revision
-`4e6698ba8e85059d749020e3c4d2123719f23926` (lastModified 2026-04-05).
-
-Loaded by `lib/glm5_tokenizer.py::load_tokenizer()`:
-
-```python
-from lib.prompt_encoder import GLM5TokenEncoder
-encoder = GLM5TokenEncoder(tokenizer_path="models/glm5_tokenizer")
-```
-
-### Why vendored in git?
+## Why vendor in git?
 
 Ascend dev environments are air-gapped from huggingface.co. Without these
-files, `--encoder glm5_token` would block on `hf download`. Storing the 3
-files (~20 MB) in git lets Ascend runners `git pull` and immediately run
-the token-level pipeline.
+files, `--encoder hf_token`/`--encoder glm5_token` would block on
+`hf download`. Storing the 3 small files (~20 MB each) in git lets Ascend
+runners `git pull` and immediately run the token-level pipeline.
 
-Weight files (282 × ~5 GB safetensors) are deliberately **not** committed
-— this directory's `.gitignore` rule allows tokenizer files but blocks
-`*.safetensors` / `*.bin` / `*.gguf` / `*.pt`.
+Weight files (sharded `.safetensors`/`.bin`/`.gguf`/`.pt`) are deliberately
+**not** committed — the repo `.gitignore` allowlists `models/*_tokenizer/`
+exceptions but blocks weight extensions inside them.
 
-### Refresh procedure
+## Layout convention
 
-If GLM-5 publishes a new tokenizer revision:
+Each tokenizer lives in `models/<name>_tokenizer/` and ships only:
+
+| File | Purpose |
+|---|---|
+| `tokenizer.json` | BPE vocab + merges |
+| `tokenizer_config.json` | special tokens + `tokenizer_class` |
+| `chat_template.jinja` | chat template (含 thinking 模式 `<think>` tag, 若模型支持) |
+
+`lib.hf_tokenizer.load_tokenizer(path)` 走 `AutoTokenizer.from_pretrained(path, trust_remote_code=True)`,
+对所有 vendor 目录通用. 使用方式:
+
+```python
+from lib.prompt_encoder import HFTokenEncoder
+encoder = HFTokenEncoder(tokenizer_path="models/qwen_v3_tokenizer")
+```
+
+或 CLI: `--encoder hf_token --tokenizer-path models/<name>_tokenizer`.
+
+## Available tokenizers
+
+| Directory | HF repo | License | Notes |
+|---|---|---|---|
+| `glm5_tokenizer/` | [`zai-org/GLM-5`](https://huggingface.co/zai-org/GLM-5) | MIT | thinking model; `wrap_user` overhead = 5 tokens; vocab_size 154820. revision `4e6698ba8e85059d749020e3c4d2123719f23926` |
+| `qwen_v3_tokenizer/` | (待 vendor) | — | Qwen-V3 系列 |
+| `qwen_v35_tokenizer/` | (待 vendor) | — | Qwen-V3.5 系列 |
+
+(凡 "待 vendor" 行: 代码已就绪, 只等 tokenizer 文件 commit; 不阻塞 hf_token 通用代码合入.)
+
+## Refresh procedure (添加新模型 / 升级版本)
 
 ```bash
-.venv_glm5/bin/hf download zai-org/GLM-5 \
+# 1. 在能联网的机器上拉 tokenizer
+.venv_glm5/bin/hf download <hf-repo-id> \
   tokenizer.json tokenizer_config.json chat_template.jinja \
-  --local-dir models/glm5_tokenizer
-git add models/glm5_tokenizer/
-git commit -m "chore(models): bump GLM-5 tokenizer to <new-sha>"
+  --local-dir models/<name>_tokenizer
+
+# 2. commit
+git add models/<name>_tokenizer/
+git commit -m "chore(models): add <name> tokenizer @ <sha>"
+
+# 3. Ascend / 其他离线机
+git pull
+# 即刻可用: --encoder hf_token --tokenizer-path models/<name>_tokenizer
 ```
+
+## `glm5_token` 向后兼容
+
+CLI `--encoder glm5_token` 仍然支持, 默认 `--tokenizer-path models/glm5_tokenizer`,
+内部走 `GLM5TokenEncoder` (`HFTokenEncoder` 子类, `name="glm5_token_v1"`).
+已落盘的 `user_summary.json` metadata 字段不受影响.

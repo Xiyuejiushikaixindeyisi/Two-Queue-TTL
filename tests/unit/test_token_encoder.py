@@ -1,4 +1,4 @@
-"""Unit tests for lib.prompt_encoder.GLM5TokenEncoder + lib.glm5_tokenizer.
+"""Unit tests for lib.prompt_encoder.{HFTokenEncoder,GLM5TokenEncoder} + lib.hf_tokenizer.
 
 Covers Step 1.6 plan §8.1 token-level test plan:
 - tokenizer loads (skipped if transformers / tokenizer files missing)
@@ -6,7 +6,9 @@ Covers Step 1.6 plan §8.1 token-level test plan:
 - chat_mode parity with raw `tokenizer.apply_chat_template`
 - prefix growth (LCP necessary condition)
 - sha256 fallback hash chain property
-- 5 fixed-overhead tokens (wrap_user; confirmed in P1 findings §2)
+- 5 fixed-overhead tokens (wrap_user; GLM-5 specific, confirmed in P1 findings §2)
+- HFTokenEncoder ≡ GLM5TokenEncoder when tokenizer_path = models/glm5_tokenizer
+  (back-compat invariant)
 """
 from __future__ import annotations
 
@@ -31,8 +33,8 @@ if not _TOKENIZER_DIR.exists():
 
 transformers = pytest.importorskip("transformers")
 
-from lib.glm5_tokenizer import apply_template, load_tokenizer
-from lib.prompt_encoder import GLM5TokenEncoder
+from lib.hf_tokenizer import apply_template, load_tokenizer
+from lib.prompt_encoder import GLM5TokenEncoder, HFTokenEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +52,13 @@ def encoder():
     return GLM5TokenEncoder(tokenizer_path=str(_TOKENIZER_DIR), chat_mode="wrap_user")
 
 
+@pytest.fixture(scope="module")
+def hf_encoder():
+    return HFTokenEncoder(tokenizer_path=str(_TOKENIZER_DIR), chat_mode="wrap_user")
+
+
 # ---------------------------------------------------------------------------
-# Tokenizer-layer tests (lib.glm5_tokenizer)
+# Tokenizer-layer tests (lib.hf_tokenizer)
 # ---------------------------------------------------------------------------
 
 
@@ -128,12 +135,29 @@ def test_invalid_chat_mode_raises(tokenizer):
 
 
 # ---------------------------------------------------------------------------
-# Encoder-layer tests (lib.prompt_encoder.GLM5TokenEncoder)
+# Encoder-layer tests (lib.prompt_encoder.{HFTokenEncoder, GLM5TokenEncoder})
 # ---------------------------------------------------------------------------
 
 
 def test_encoder_name_metadata(encoder):
+    """Back-compat: glm5_token_v1 name preserved for historical JSON metadata."""
     assert encoder.name == "glm5_token_v1"
+    assert encoder.block_unit == "tokens"
+    assert encoder.hash_algo == "sha256_chain_fallback"
+
+
+def test_hf_encoder_name_metadata(hf_encoder):
+    """HFTokenEncoder uses generic name; block_unit/hash_algo aligned."""
+    assert hf_encoder.name == "hf_token_v1"
+    assert hf_encoder.block_unit == "tokens"
+    assert hf_encoder.hash_algo == "sha256_chain_fallback"
+
+
+def test_glm5_is_alias_of_hf(encoder, hf_encoder):
+    """GLM5TokenEncoder must produce identical keys to HFTokenEncoder
+    when pointed at the same tokenizer (back-compat invariant)."""
+    raw = "今天天气怎么样? 帮我写一段 Python 处理 JSON 的代码。" * 10
+    assert encoder.encode(raw) == hf_encoder.encode(raw)
 
 
 def test_encoder_deterministic(encoder):

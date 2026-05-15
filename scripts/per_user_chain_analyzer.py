@@ -180,16 +180,19 @@ def parse_args() -> argparse.Namespace:
                         "with ratio in 0.15-0.45 band); 0.95 for strict closure")
     p.add_argument("--coverage-threshold", type=float, default=0.05)
     p.add_argument("--block-size", type=int, default=128,
-                   help="bytes (byte encoder) or tokens (glm5_token encoder) per block")
-    # Step 1.6: Encoder strategy (byte = regression baseline; glm5_token =精确化)
+                   help="bytes (byte encoder) or tokens (glm5_token / hf_token encoder) per block")
+    # Step 1.6: Encoder strategy (byte = regression baseline; glm5_token/hf_token =精确化)
     p.add_argument("--encoder", type=str, default="byte",
-                   choices=["byte", "glm5_token"],
-                   help="prompt encoding strategy (default: byte; glm5_token requires transformers + GLM-5 tokenizer)")
+                   choices=["byte", "glm5_token", "hf_token"],
+                   help="prompt encoding strategy (default: byte; "
+                        "glm5_token = back-compat alias for models/glm5_tokenizer; "
+                        "hf_token = any HF tokenizer via --tokenizer-path)")
     p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
-                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+                   help="HF tokenizer dir or repo id (used by glm5_token / hf_token); "
+                        "e.g. models/qwen_v3_tokenizer, models/qwen_v35_tokenizer")
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"],
-                   help="chat template wrapping (default: wrap_user; only used when --encoder=glm5_token)")
+                   help="chat template wrapping (used by glm5_token / hf_token)")
     p.add_argument("--max-decoded-blocks", type=int, default=None,
                    help="Cap decoded blocks per chain (default: full chain)")
     # v2 (per_user_chains_html_redesign.md): spike detection config

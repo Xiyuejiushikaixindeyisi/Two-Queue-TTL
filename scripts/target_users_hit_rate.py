@@ -34,6 +34,10 @@ Usage
     python3 scripts/target_users_hit_rate.py --dir data/ \\
         --users uid1,uid2,uid3 --encoder glm5_token
 
+    # 任意 HF tokenizer (Qwen-V3 / Qwen-V3.5 / DeepSeek-V3 / …)
+    python3 scripts/target_users_hit_rate.py --dir data/ \\
+        --encoder hf_token --tokenizer-path models/qwen_v3_tokenizer
+
 Output
 ------
     1. 终端: pivot 表 (行=model, 列=user, cell=ideal_hit_rate(reqs))
@@ -133,14 +137,16 @@ def analyze_one_model(csv_files: list[Path], target_users: list[str], encoder) -
 def discover_models(data_dir: Path) -> list[tuple[str, list[Path]]]:
     """自动发现 data/<model>/raw/*.csv 布局。
 
-    跳过 data/out_*, data/models, data/glm5_tokenizer 等非数据集目录。
+    跳过 data/out_*, data/models, data/*_tokenizer 等非数据集目录。
+    注意: 此函数会把 data/ 下**所有**含 raw/*.csv 的子目录都返回; 如需
+    限定子集 (例如只算本次新数据集而排除历史 trace), 请显式传 --models。
     """
     models = []
     for sub in sorted(data_dir.iterdir()):
         if not sub.is_dir():
             continue
         name = sub.name
-        if name.startswith("out_") or name.startswith(".") or name == "glm5_tokenizer":
+        if name.startswith("out_") or name.startswith(".") or name.endswith("_tokenizer"):
             continue
         raw_dir = sub / "raw"
         if not raw_dir.is_dir():
@@ -164,10 +170,12 @@ def main() -> None:
                    help="逗号分隔目标 user_id (默认: 4 个内嵌)")
     # encoder 选项 (与 per_user_report_analyzer.py 对齐)
     p.add_argument("--encoder", type=str, default="byte",
-                   choices=["byte", "glm5_token"],
-                   help="编码策略 (默认 byte; glm5_token 需 transformers + tokenizer)")
+                   choices=["byte", "glm5_token", "hf_token"],
+                   help="编码策略 (默认 byte; glm5_token = 兼容 alias 指向 models/glm5_tokenizer; "
+                        "hf_token = 任意 HF tokenizer, 由 --tokenizer-path 指定)")
     p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
-                   help="GLM-5 tokenizer 路径 (仅 --encoder=glm5_token 时用)")
+                   help="HF tokenizer 目录或 HF repo id (glm5_token / hf_token 用); "
+                        "例如 models/qwen_v3_tokenizer, models/qwen_v35_tokenizer")
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"],
                    help="chat template wrapping (默认 wrap_user)")

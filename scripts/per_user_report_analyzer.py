@@ -1193,8 +1193,8 @@ def analyze_user(
         "encoder_meta": {  # Step 1.6: token-vs-byte 区分; HTML banner 读这里
             "name": encoder.name,
             "block_size": args.block_size,
-            "block_unit": "tokens" if encoder.name == "glm5_token_v1" else "bytes",
-            "hash_algo": "sha256_chain_fallback" if encoder.name == "glm5_token_v1" else "sha256_chain",
+            "block_unit": getattr(encoder, "block_unit", "bytes"),
+            "hash_algo": getattr(encoder, "hash_algo", "sha256_chain"),
             "chat_mode": getattr(encoder, "chat_mode", None),
             "tokenizer_path": getattr(encoder, "tokenizer_path", None),
         },
@@ -1364,16 +1364,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-k-users",     type=int,   default=DEFAULT_TOP_K)
     p.add_argument("--min-request-pct", type=float, default=DEFAULT_MIN_REQUEST_PCT)
     p.add_argument("--block-size",      type=int,   default=128,
-                   help="bytes (byte encoder) or tokens (glm5_token encoder) per block")
+                   help="bytes (byte encoder) or tokens (glm5_token / hf_token encoder) per block")
     # Step 1.6: encoder strategy
     p.add_argument("--encoder", type=str, default="byte",
-                   choices=["byte", "glm5_token"],
-                   help="prompt encoding strategy (default: byte)")
+                   choices=["byte", "glm5_token", "hf_token"],
+                   help="prompt encoding strategy (default: byte; "
+                        "glm5_token = back-compat alias for models/glm5_tokenizer; "
+                        "hf_token = any HF tokenizer via --tokenizer-path)")
     p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
-                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+                   help="HF tokenizer dir or repo id (used by glm5_token / hf_token); "
+                        "e.g. models/qwen_v3_tokenizer, models/qwen_v35_tokenizer")
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"],
-                   help="chat template wrapping (only used when --encoder=glm5_token)")
+                   help="chat template wrapping (used by glm5_token / hf_token)")
     p.add_argument("--mc-branch-threshold",   type=float, default=DEFAULT_MC_BRANCH_THRESHOLD)
     p.add_argument("--mc-coverage-threshold", type=float, default=DEFAULT_MC_COVERAGE_THRESHOLD)
     p.add_argument("--mc-min-chain-length",   type=int,   default=DEFAULT_MIN_CHAIN_LENGTH)

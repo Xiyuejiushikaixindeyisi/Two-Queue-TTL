@@ -1392,18 +1392,27 @@ def _render_encoder_banner(encoder_meta: dict | None) -> str:
     """Step 1.6: top-of-report banner indicating byte-level vs token-level.
 
     Empty string when encoder_meta is missing (back-compat for old runs).
+    Token-level branch covers both glm5_token (alias) and hf_token (generic
+    HF tokenizer) — distinguished by tokenizer_path basename in the banner.
     """
     if not encoder_meta:
         return ""
-    name = encoder_meta.get("name") or "byte_v1"
     block_size = encoder_meta.get("block_size", 128)
-    if name == "glm5_token_v1":
-        unit = encoder_meta.get("block_unit", "tokens")
+    block_unit = encoder_meta.get("block_unit") or (
+        "tokens" if (encoder_meta.get("name") or "").endswith("_token_v1") else "bytes"
+    )
+    if block_unit == "tokens":
         chat_mode = encoder_meta.get("chat_mode", "wrap_user")
-        tokenizer = encoder_meta.get("tokenizer_path", "models/glm5_tokenizer")
+        tokenizer = encoder_meta.get("tokenizer_path") or ""
+        # tokenizer dir basename → 友好标签, e.g. "glm5_tokenizer" → "GLM5",
+        # "qwen_v3_tokenizer" → "QWEN_V3"
+        import os
+        tag = os.path.basename(tokenizer.rstrip("/")) or "hf"
+        tag = tag.removesuffix("_tokenizer").upper() or "HF"
         return (
             '<div class="encoder-banner-token">'
-            f'🔤 <b>Token-Level (GLM-5)</b>: <code>block_size={block_size} {unit}</code>, '
+            f'🔤 <b>Token-Level ({html.escape(tag)})</b>: '
+            f'<code>block_size={block_size} {block_unit}</code>, '
             f'tokenizer = <code>{html.escape(tokenizer)}</code>, '
             f'chat_mode = <code>{html.escape(chat_mode)}</code>, '
             f'hash = <code>sha256_chain_fallback</code> (与 vllm_hash 不 bit-exact 但 deterministic, '
@@ -1416,7 +1425,8 @@ def _render_encoder_banner(encoder_meta: dict | None) -> str:
         f'⚙ <b>Byte-Level</b>: <code>block_size={block_size} bytes</code>, sha256 chain. '
         '字节级数字相对 vllm 实际命中率系统性偏高 0-30pp '
         '(详见 <code>docs/metrics_glossary.md §3</code>); '
-        '若需精确, 用 <code>--encoder glm5_token</code> 重跑。'
+        '若需精确, 用 <code>--encoder glm5_token</code> (或 <code>--encoder hf_token '
+        '--tokenizer-path models/&lt;name&gt;_tokenizer</code>) 重跑。'
         '</div>'
     )
 

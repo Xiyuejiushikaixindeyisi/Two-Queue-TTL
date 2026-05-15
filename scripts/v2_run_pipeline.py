@@ -84,7 +84,7 @@ def run_analyzer(
         "--output-dir", str(output_dir / model / "per_user_reports"),
         "--encoder", encoder,
     ]
-    if encoder == "glm5_token":
+    if encoder in ("glm5_token", "hf_token"):
         cmd += ["--tokenizer-path", tokenizer_path, "--chat-mode", chat_mode]
     cmd += extra
     print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
@@ -300,13 +300,16 @@ def parse_args() -> argparse.Namespace:
                    help="Skip cross-model summary generation")
     # Step 1.6: token-level encoding (forwarded to analyzer subprocess)
     p.add_argument("--encoder", type=str, default="byte",
-                   choices=["byte", "glm5_token"],
-                   help="prompt encoding strategy (default: byte regression baseline)")
+                   choices=["byte", "glm5_token", "hf_token"],
+                   help="prompt encoding strategy (default: byte regression baseline; "
+                        "glm5_token = back-compat alias pinned to models/glm5_tokenizer; "
+                        "hf_token = any HF AutoTokenizer via --tokenizer-path)")
     p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
-                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+                   help="HF tokenizer dir or repo id (used by glm5_token / hf_token). "
+                        "For hf_token, point at models/qwen_v3_tokenizer / models/qwen_v35_tokenizer / etc.")
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"],
-                   help="chat template wrapping (only used when --encoder=glm5_token)")
+                   help="chat template wrapping (used by glm5_token / hf_token)")
     return p.parse_args()
 
 

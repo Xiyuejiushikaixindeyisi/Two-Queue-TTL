@@ -23,14 +23,16 @@ ENV/
 # ── Tokenizer / model weights ─────────────────────────────────────────────
 # Commit small tokenizer files (Ascend dev envs may be air-gapped from HF);
 # never commit large model weights.
+# Convention: each tokenizer lives in `models/<name>_tokenizer/` and ships
+# only 3 small files (tokenizer.json + tokenizer_config.json + chat_template.jinja).
 models/*
 !models/README.md
-!models/glm5_tokenizer/
-# Defensive: even within a tokenizer dir, never commit weights / sharded files
-models/glm5_tokenizer/*.safetensors
-models/glm5_tokenizer/*.bin
-models/glm5_tokenizer/*.gguf
-models/glm5_tokenizer/*.pt
+!models/*_tokenizer/
+# Defensive: within any tokenizer dir, never commit weights / sharded files
+models/*_tokenizer/*.safetensors
+models/*_tokenizer/*.bin
+models/*_tokenizer/*.gguf
+models/*_tokenizer/*.pt
 
 # ── Test & coverage ──────────────────────────────────────────────────────────
 .pytest_cache/
