@@ -14,9 +14,13 @@ lib64/
 
 # ── Virtual environments ─────────────────────────────────────────────────────
 .venv/
+.venv_*/
 venv/
 env/
 ENV/
+
+# ── Tokenizer / model weights (download separately, never commit) ───────────
+models/
 
 # ── Test & coverage ──────────────────────────────────────────────────────────
 .pytest_cache/
