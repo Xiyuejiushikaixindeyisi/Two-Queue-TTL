@@ -9,7 +9,8 @@ build/
 .eggs/
 *.egg
 .installed.cfg
-lib/
+# Note: removed `lib/` rule — we ship lib/ as a Python package (see step1_6 plan §4.1).
+# venv-internal lib/ is still ignored because .venv/ / .venv_*/ / venv/ are blanket-ignored below.
 lib64/
 
 # ── Virtual environments ─────────────────────────────────────────────────────
