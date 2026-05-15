@@ -32,6 +32,8 @@ from typing import Optional
 
 # Reuse Step 1.1 primitives
 sys.path.insert(0, str(Path(__file__).parent))
+# Step 1.6: lib/ provides PromptEncoder Protocol + Byte/GLM5 implementations
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from verify_chain_path_closure import (  # noqa: E402
     TrieNode,
     _canon_fieldnames,
@@ -43,6 +45,7 @@ from verify_chain_path_closure import (  # noqa: E402
     split_blocks,
     trie_insert,
 )
+from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
 # Reuse Step 1.5 v2 metrics (spike detection + percentile)
 from per_user_report_analyzer import (  # noqa: E402
     DEFAULT_SPIKE_WINDOW_MIN,
@@ -176,7 +179,17 @@ def parse_args() -> argparse.Namespace:
                         "evidence; 0.45 was the 04-30 default but missed chains "
                         "with ratio in 0.15-0.45 band); 0.95 for strict closure")
     p.add_argument("--coverage-threshold", type=float, default=0.05)
-    p.add_argument("--block-size", type=int, default=128)
+    p.add_argument("--block-size", type=int, default=128,
+                   help="bytes (byte encoder) or tokens (glm5_token encoder) per block")
+    # Step 1.6: Encoder strategy (byte = regression baseline; glm5_token =精确化)
+    p.add_argument("--encoder", type=str, default="byte",
+                   choices=["byte", "glm5_token"],
+                   help="prompt encoding strategy (default: byte; glm5_token requires transformers + GLM-5 tokenizer)")
+    p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
+                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+    p.add_argument("--chat-mode", type=str, default="wrap_user",
+                   choices=["raw", "wrap_user", "messages"],
+                   help="chat template wrapping (default: wrap_user; only used when --encoder=glm5_token)")
     p.add_argument("--max-decoded-blocks", type=int, default=None,
                    help="Cap decoded blocks per chain (default: full chain)")
     # v2 (per_user_chains_html_redesign.md): spike detection config
@@ -197,6 +210,11 @@ def main() -> None:
         print(f"No CSV files found at {args.raw_csv}", file=sys.stderr)
         sys.exit(1)
     print(f"Input: {len(csv_files)} CSV file(s) under {args.raw_csv}", flush=True)
+
+    # Step 1.6: build encoder (byte = current baseline, glm5_token = 精确化)
+    encoder, encoder_meta = build_encoder_from_args(args)
+    print(f"Encoder: {encoder_meta['name']} (block_size={args.block_size} {encoder_meta['block_unit']}, "
+          f"chat_mode={encoder_meta['chat_mode']})", flush=True)
 
     # ---- Phase 1: build global trie + per-user tries + v2 metrics in one pass ----
     t0 = time.time()
@@ -241,8 +259,9 @@ def main() -> None:
             user_roots[user_id].count += 1
             continue
 
-        blocks = split_blocks(raw_prompt, args.block_size)
-        keys = compute_prefix_path_keys(blocks)
+        # Step 1.6: delegate Layer 2-4 (chat_template + tokenize + hash chain)
+        # to encoder. byte encoder == split_blocks + compute_prefix_path_keys.
+        keys = encoder.encode(raw_prompt)
         n_blocks_total += len(keys)
         user_total_blocks[user_id] += len(keys)
 
@@ -537,6 +556,7 @@ def main() -> None:
     output = {
         "input": str(args.raw_csv),
         "input_files": [str(p) for p in csv_files],
+        "encoder_meta": encoder_meta,  # Step 1.6
         "params": {
             "branch_threshold": args.branch_threshold,
             "coverage_threshold": args.coverage_threshold,

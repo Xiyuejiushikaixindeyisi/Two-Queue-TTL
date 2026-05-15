@@ -46,6 +46,8 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+# Step 1.6: lib/ for PromptEncoder strategies
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from verify_chain_path_closure import (  # noqa: E402
     TrieNode,
     compute_prefix_path_keys,
@@ -54,6 +56,7 @@ from verify_chain_path_closure import (  # noqa: E402
     split_blocks,
     trie_insert,
 )
+from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
 from multi_chain_finder import (  # noqa: E402
     DEFAULT_MC_BRANCH_THRESHOLD,
     DEFAULT_MC_COVERAGE_THRESHOLD,
@@ -983,11 +986,17 @@ def analyze_user(
     user_id: str,
     records: list[tuple[str, int, str]],
     args: argparse.Namespace,
+    encoder=None,  # Step 1.6: PromptEncoder; None → byte default (back-compat)
 ) -> tuple[dict, dict, TrieNode]:
     """One pass over the user's records, then chain forest + decode.
 
     Returns (user_report, chain_forest, trie_root).
     """
+    if encoder is None:
+        # Lazy fallback so callers from older code paths still work (e.g. tests).
+        from lib.prompt_encoder import ByteLevelEncoder
+        encoder = ByteLevelEncoder(block_size_bytes=args.block_size)
+
     t0 = time.time()
 
     # Sort by timestamp (stable on rid for determinism)
@@ -1034,8 +1043,9 @@ def analyze_user(
             per_request_lcp.append(0)
             continue
 
-        blocks = split_blocks(prompt, args.block_size)
-        keys = compute_prefix_path_keys(blocks)
+        # Step 1.6: delegate Layer 2-4 to encoder.
+        # byte encoder is equivalent to split_blocks + compute_prefix_path_keys.
+        keys = encoder.encode(prompt)
         total_blocks += len(keys)
 
         # LCP: longest prefix-run of seen keys.
@@ -1180,6 +1190,14 @@ def analyze_user(
 
     user_report = {
         "user_id": user_id,
+        "encoder_meta": {  # Step 1.6: token-vs-byte 区分; HTML banner 读这里
+            "name": encoder.name,
+            "block_size": args.block_size,
+            "block_unit": "tokens" if encoder.name == "glm5_token_v1" else "bytes",
+            "hash_algo": "sha256_chain_fallback" if encoder.name == "glm5_token_v1" else "sha256_chain",
+            "chat_mode": getattr(encoder, "chat_mode", None),
+            "tokenizer_path": getattr(encoder, "tokenizer_path", None),
+        },
         "params": {
             "block_size":               args.block_size,
             "mc_branch_threshold":      args.mc_branch_threshold,
@@ -1345,7 +1363,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument("--top-k-users",     type=int,   default=DEFAULT_TOP_K)
     p.add_argument("--min-request-pct", type=float, default=DEFAULT_MIN_REQUEST_PCT)
-    p.add_argument("--block-size",      type=int,   default=128)
+    p.add_argument("--block-size",      type=int,   default=128,
+                   help="bytes (byte encoder) or tokens (glm5_token encoder) per block")
+    # Step 1.6: encoder strategy
+    p.add_argument("--encoder", type=str, default="byte",
+                   choices=["byte", "glm5_token"],
+                   help="prompt encoding strategy (default: byte)")
+    p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
+                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+    p.add_argument("--chat-mode", type=str, default="wrap_user",
+                   choices=["raw", "wrap_user", "messages"],
+                   help="chat template wrapping (only used when --encoder=glm5_token)")
     p.add_argument("--mc-branch-threshold",   type=float, default=DEFAULT_MC_BRANCH_THRESHOLD)
     p.add_argument("--mc-coverage-threshold", type=float, default=DEFAULT_MC_COVERAGE_THRESHOLD)
     p.add_argument("--mc-min-chain-length",   type=int,   default=DEFAULT_MIN_CHAIN_LENGTH)
@@ -1388,6 +1416,11 @@ def main() -> None:
         print(f"error: no CSV files at {args.raw_csv}", file=sys.stderr)
         sys.exit(1)
     print(f"Input: {len(csv_files)} CSV file(s) under {args.raw_csv}", flush=True)
+
+    # Step 1.6: build encoder (byte = current baseline, glm5_token = 精确化)
+    encoder, encoder_meta = build_encoder_from_args(args)
+    print(f"Encoder: {encoder_meta['name']} (block_size={args.block_size} {encoder_meta['block_unit']}, "
+          f"chat_mode={encoder_meta['chat_mode']})", flush=True)
 
     # Pass 1: counts + req_per_5min for spike detection + model-level time-series
     t_pass1 = time.time()
@@ -1447,7 +1480,7 @@ def main() -> None:
     # ---- Pass 1: analyze each user, write chain_forest.json now ----
     for uid in selected:
         print(f"\nAnalyzing {uid} ({counts[uid]:,} requests)...", flush=True)
-        report, forest, _root = analyze_user(uid, records_by_user[uid], args)
+        report, forest, _root = analyze_user(uid, records_by_user[uid], args, encoder=encoder)
 
         udir = args.output_dir / safe_dirname(uid)
         udir.mkdir(parents=True, exist_ok=True)
@@ -1590,6 +1623,7 @@ def main() -> None:
     # Preserve manually-filled fields from a prior run so re-running the
     # analyzer doesn't clobber what the user typed in.
     model_report = dict(model_context)
+    model_report["encoder_meta"] = encoder_meta  # Step 1.6
     model_report["thresholds"] = thresholds
     model_report["_note"] = (
         "Fill model_params_class / instance_count / cache_capacity_blocks manually "

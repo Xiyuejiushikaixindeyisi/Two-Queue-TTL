@@ -77,6 +77,7 @@ class GLM5TokenEncoder:
     ):
         self.tokenizer = load_tokenizer(tokenizer_path)
         self.chat_mode = chat_mode
+        self.tokenizer_path = tokenizer_path
         self.block_size_tokens = block_size_tokens
 
     def encode(self, raw_prompt: str) -> list[bytes]:
@@ -94,3 +95,44 @@ class GLM5TokenEncoder:
             prev = h.digest()
             keys.append(prev)
         return keys
+
+
+# ---------------------------------------------------------------------------
+# Public helper: build encoder + emit JSON meta from argparse Namespace.
+# Used by scripts/per_user_chain_analyzer.py and scripts/per_user_report_analyzer.py.
+# ---------------------------------------------------------------------------
+
+
+def build_encoder_from_args(args) -> tuple[PromptEncoder, dict]:
+    """Read --encoder / --tokenizer-path / --chat-mode / --block-size from args.
+
+    Returns (encoder, encoder_meta_dict). encoder_meta is emitted to JSON for
+    HTML banner + downstream consumers (see render_user_report_html.py).
+    """
+    if args.encoder == "byte":
+        encoder = ByteLevelEncoder(block_size_bytes=args.block_size)
+        meta = {
+            "name": encoder.name,
+            "block_size": args.block_size,
+            "block_unit": "bytes",
+            "hash_algo": "sha256_chain",
+            "chat_mode": None,
+            "tokenizer_path": None,
+        }
+    elif args.encoder == "glm5_token":
+        encoder = GLM5TokenEncoder(
+            tokenizer_path=args.tokenizer_path,
+            chat_mode=args.chat_mode,
+            block_size_tokens=args.block_size,
+        )
+        meta = {
+            "name": encoder.name,
+            "block_size": args.block_size,
+            "block_unit": "tokens",
+            "hash_algo": "sha256_chain_fallback",
+            "chat_mode": args.chat_mode,
+            "tokenizer_path": args.tokenizer_path,
+        }
+    else:
+        raise ValueError(f"unknown encoder: {args.encoder!r}")
+    return encoder, meta

@@ -140,6 +140,10 @@ pre.decoded { background: #1a202c; color: #e2e8f0; padding: 10px 14px;
 /* v3 (user_report_html_redesign.md): banner + horizontal bar compare + shadow + queue */
 .algo-diff-banner { background: #ebf8ff; border-left: 5px solid #3182ce;
   padding: 12px 18px; margin: 14px 0; font-size: 0.9em; color: #2c5282; }
+.encoder-banner-token { background: #fef5e7; border-left: 5px solid #d69e2e;
+  padding: 12px 18px; margin: 14px 0; font-size: 0.9em; color: #744210; }
+.encoder-banner-byte { background: #f7fafc; border-left: 5px solid #a0aec0;
+  padding: 10px 18px; margin: 14px 0; font-size: 0.85em; color: #4a5568; }
 .hbar-row { display: grid; grid-template-columns: 80px 1fr 120px;
   gap: 8px; align-items: center; margin: 4px 0; font-size: 0.88em; }
 .hbar-label { font-weight: 600; color: #4a5568; }
@@ -1384,6 +1388,39 @@ def render_chain_forest_with_shadow(report: dict, forest: dict) -> str:
 """
 
 
+def _render_encoder_banner(encoder_meta: dict | None) -> str:
+    """Step 1.6: top-of-report banner indicating byte-level vs token-level.
+
+    Empty string when encoder_meta is missing (back-compat for old runs).
+    """
+    if not encoder_meta:
+        return ""
+    name = encoder_meta.get("name") or "byte_v1"
+    block_size = encoder_meta.get("block_size", 128)
+    if name == "glm5_token_v1":
+        unit = encoder_meta.get("block_unit", "tokens")
+        chat_mode = encoder_meta.get("chat_mode", "wrap_user")
+        tokenizer = encoder_meta.get("tokenizer_path", "models/glm5_tokenizer")
+        return (
+            '<div class="encoder-banner-token">'
+            f'🔤 <b>Token-Level (GLM-5)</b>: <code>block_size={block_size} {unit}</code>, '
+            f'tokenizer = <code>{html.escape(tokenizer)}</code>, '
+            f'chat_mode = <code>{html.escape(chat_mode)}</code>, '
+            f'hash = <code>sha256_chain_fallback</code> (与 vllm_hash 不 bit-exact 但 deterministic, '
+            '不影响 hit_rate, 见 <code>docs/step1_6_token_level_experiment_plan.md §6</code>).'
+            '</div>'
+        )
+    # byte (regression baseline)
+    return (
+        '<div class="encoder-banner-byte">'
+        f'⚙ <b>Byte-Level</b>: <code>block_size={block_size} bytes</code>, sha256 chain. '
+        '字节级数字相对 vllm 实际命中率系统性偏高 0-30pp '
+        '(详见 <code>docs/metrics_glossary.md §3</code>); '
+        '若需精确, 用 <code>--encoder glm5_token</code> 重跑。'
+        '</div>'
+    )
+
+
 def render_user_html(
     report: dict, forest: dict,
     total_users: int, total_requests: int,
@@ -1431,6 +1468,9 @@ def render_user_html(
         '</div>'
     )
 
+    # Step 1.6: encoder banner (byte vs token-level GLM-5).
+    encoder_banner = _render_encoder_banner(report.get("encoder_meta"))
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8">
@@ -1442,6 +1482,7 @@ def render_user_html(
 </h1>
 {single_tenant_note}
 {caveat_html}
+{encoder_banner}
 {algo_banner}
 
 {render_model_section(model_report)}

@@ -71,6 +71,8 @@ def safe_dirname_local(user_id: str) -> str:
 
 def run_analyzer(
     data_dir: Path, output_dir: Path, model: str, extra: list[str],
+    encoder: str = "byte", tokenizer_path: str = "models/glm5_tokenizer",
+    chat_mode: str = "wrap_user",
 ) -> bool:
     raw = data_dir / model / "raw"
     if not raw.exists():
@@ -80,7 +82,11 @@ def run_analyzer(
         sys.executable, "scripts/per_user_report_analyzer.py",
         "--raw-csv", str(raw),
         "--output-dir", str(output_dir / model / "per_user_reports"),
-    ] + extra
+        "--encoder", encoder,
+    ]
+    if encoder == "glm5_token":
+        cmd += ["--tokenizer-path", tokenizer_path, "--chat-mode", chat_mode]
+    cmd += extra
     print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
     res = subprocess.run(cmd, cwd=str(ROOT))
     return res.returncode == 0
@@ -292,6 +298,15 @@ def parse_args() -> argparse.Namespace:
                    help="Skip renderer pass")
     p.add_argument("--skip-summary",  action="store_true",
                    help="Skip cross-model summary generation")
+    # Step 1.6: token-level encoding (forwarded to analyzer subprocess)
+    p.add_argument("--encoder", type=str, default="byte",
+                   choices=["byte", "glm5_token"],
+                   help="prompt encoding strategy (default: byte regression baseline)")
+    p.add_argument("--tokenizer-path", type=str, default="models/glm5_tokenizer",
+                   help="GLM-5 tokenizer path (only used when --encoder=glm5_token)")
+    p.add_argument("--chat-mode", type=str, default="wrap_user",
+                   choices=["raw", "wrap_user", "messages"],
+                   help="chat template wrapping (only used when --encoder=glm5_token)")
     return p.parse_args()
 
 
@@ -312,7 +327,11 @@ def main() -> None:
         print("=" * 60, flush=True)
         for model in models:
             print(f"\n[{model}]", flush=True)
-            run_analyzer(args.data_dir, args.output_dir, model, extra)
+            run_analyzer(
+                args.data_dir, args.output_dir, model, extra,
+                encoder=args.encoder, tokenizer_path=args.tokenizer_path,
+                chat_mode=args.chat_mode,
+            )
 
     # ===== Pass 2: renderer per model =====
     if not args.skip_renderer:
