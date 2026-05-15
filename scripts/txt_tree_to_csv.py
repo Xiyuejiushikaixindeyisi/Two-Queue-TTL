@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """把 txt 树形数据集转成 pipeline 兼容的 4 列 CSV.
 
-输入布局
---------
-    <input-dir>/
-      <subdir1>/
-        <request_id_1>.txt    内容 = raw_prompt (UTF-8, 默认)
-        <request_id_2>.txt
-      <subdir2>/ …
-      <subdir3>/ …
+输入布局 (两种均支持, 自动检测)
+--------------------------------
+    flat (input-dir 直接放 txt):
+        <input-dir>/
+          <request_id_1>.txt   内容 = raw_prompt
+          <request_id_2>.txt
+    nested (按 subdir 分组):
+        <input-dir>/
+          <subdir1>/
+            <request_id_1>.txt
+          <subdir2>/ …
+检测规则: input-dir 直接有 *.txt → flat 模式 (subdir_name 取 input-dir basename);
+        否则递归子目录.
 
 输出 CSV (4 列, 列名与 per_user_report_analyzer / target_users_hit_rate 一致):
     request_id, user_id, raw_prompt, timestamp
@@ -85,7 +90,17 @@ def derive_user_id(
 
 
 def iter_txt_files(input_dir: Path):
-    """字典序遍历 <input-dir>/<subdir>/*.txt → (subdir_name, txt_path)."""
+    """字典序遍历 txt 文件 → (subdir_name, txt_path).
+
+    两种布局自动检测:
+    - flat:   <input-dir>/*.txt          → subdir_name = input_dir.name
+    - nested: <input-dir>/<sub>/*.txt   → subdir_name = sub
+    """
+    direct_txts = sorted(input_dir.glob("*.txt"))
+    if direct_txts:
+        for txt in direct_txts:
+            yield input_dir.name, txt
+        return
     for subdir in sorted(input_dir.iterdir()):
         if not subdir.is_dir():
             continue
