@@ -20,8 +20,17 @@ venv/
 env/
 ENV/
 
-# ── Tokenizer / model weights (download separately, never commit) ───────────
-models/
+# ── Tokenizer / model weights ─────────────────────────────────────────────
+# Commit small tokenizer files (Ascend dev envs may be air-gapped from HF);
+# never commit large model weights.
+models/*
+!models/README.md
+!models/glm5_tokenizer/
+# Defensive: even within a tokenizer dir, never commit weights / sharded files
+models/glm5_tokenizer/*.safetensors
+models/glm5_tokenizer/*.bin
+models/glm5_tokenizer/*.gguf
+models/glm5_tokenizer/*.pt
 
 # ── Test & coverage ──────────────────────────────────────────────────────────
 .pytest_cache/
