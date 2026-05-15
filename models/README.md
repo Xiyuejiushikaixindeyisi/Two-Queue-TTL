@@ -20,8 +20,8 @@ Each tokenizer lives in `models/<name>_tokenizer/` and ships only:
 | File | Purpose |
 |---|---|
 | `tokenizer.json` | BPE vocab + merges |
-| `tokenizer_config.json` | special tokens + `tokenizer_class` |
-| `chat_template.jinja` | chat template (含 thinking 模式 `<think>` tag, 若模型支持) |
+| `tokenizer_config.json` | special tokens + `tokenizer_class` (Qwen 系列 chat_template 嵌在这里) |
+| `chat_template.jinja` | chat template (GLM-5 用独立文件; Qwen 系列没有此文件, 模板在 tokenizer_config.json 内) |
 
 `lib.hf_tokenizer.load_tokenizer(path)` 走 `AutoTokenizer.from_pretrained(path, trust_remote_code=True)`,
 对所有 vendor 目录通用. 使用方式:
@@ -38,7 +38,7 @@ encoder = HFTokenEncoder(tokenizer_path="models/qwen_v3_tokenizer")
 | Directory | HF repo | License | Notes |
 |---|---|---|---|
 | `glm5_tokenizer/` | [`zai-org/GLM-5`](https://huggingface.co/zai-org/GLM-5) | MIT | thinking model; `wrap_user` overhead = 5 tokens; vocab_size 154820. revision `4e6698ba8e85059d749020e3c4d2123719f23926` |
-| `qwen_v3_tokenizer/` | (待 vendor) | — | Qwen-V3 系列 |
+| `qwen_v3_tokenizer/` | [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) | Apache-2.0 | `Qwen2Tokenizer` backbone; vocab_size 151643; `wrap_user` overhead = 8 tokens (`<\|im_start\|>user\n…<\|im_end\|>\n<\|im_start\|>assistant\n`); chat_template **嵌在 tokenizer_config.json**, 没有独立 `.jinja` 文件. revision `b968826d9c46dd6066d109eabc6255188de91218` |
 | `qwen_v35_tokenizer/` | (待 vendor) | — | Qwen-V3.5 系列 |
 
 (凡 "待 vendor" 行: 代码已就绪, 只等 tokenizer 文件 commit; 不阻塞 hf_token 通用代码合入.)
