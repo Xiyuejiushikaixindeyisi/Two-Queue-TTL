@@ -168,7 +168,19 @@ print("test3 - len:", len(ids3), "decoded:", repr(tok.decode(ids3)))
 
 ---
 
-## 3. 6 个生产数据集 raw_prompt 抽样
+## 3. 6 个生产数据集 raw_prompt 抽样 (已跳过 — 用户口头确认)
+
+> **2026-05-15 用户回复**: "数据集中每条请求都是未经 chat_template 处理的原始输入, 最长的单条请求长度为 128k token."
+>
+> **结论**:
+> - chat_mode 直接锁定为 **wrap_user** (无需 Ascend 机跑 sample_raw_prompts.py)
+> - 单条 prompt 长度上限: **128k tokens** (与 GLM-5 model_max_length=202752 一致, 不超模型限制)
+> - `sample_raw_prompts.py` 保留作为工具 (未来新数据集仍可用), 但 P1 不需要执行
+>
+> 以下 §3.1-§3.4 抽样流程作为**未来新数据集** (例如下次接 Qwen / Llama trace) 的参考留存, 本次不执行.
+
+---
+
 
 ### 3.1 抽样脚本
 
@@ -267,18 +279,39 @@ print(f"avg tokens/prompt: {sum(len(tok.encode(p)) for p in prompts[:100])/100:.
 
 ### 4.2 实测结果 (2026-05-15, 本机 venv, 单线程)
 
-| Prompt 类型 | 速度 | 平均 tokens/req |
+**实测吞吐 ~720k tokens/s** (BPE 是线性的, "req/s" 没意义 — 单条耗时与 token 数成正比).
+
+| 单条 prompt 大小 | tokenize 耗时 |
+|---|---|
+| 12 tokens (问候) | 0.05 ms |
+| 744 tokens (短聊) | 0.7 ms |
+| 10k tokens (中等) | 7 ms |
+| 30k tokens (RAG/工具) | 21 ms |
+| 64k tokens (长文档) | 45 ms |
+| 120k tokens (实测) | **165 ms** |
+
+### 4.3 6 数据集预估 (重做, 考虑 128k tokens max)
+
+| 假设场景 | 平均 prompt | 6 × 50K 数据集预估 |
 |---|---|---|
-| 短 prompt (10-30 tokens) | **18,364 req/s** | 12 |
-| 中长 prompt (200-3000 tokens, 平均 744) | **1,480 req/s** | 744 |
+| 短聊主导 (chatbot) | 1k tokens | ~3 min |
+| 中等 (混合用例) | 10k tokens | **~35 min** |
+| 长上下文 (RAG/工具调用) | 30k tokens | ~105 min |
+| 极端 (长文档主导) | 64k tokens | ~225 min (3.7h) |
 
-### 4.3 6 数据集预估
+> **决策**: 单线程跑 (即使最坏 3.7h 也仅一次性成本). 如真实平均 > 30k 且觉得慢, P4 时可加 multiprocessing pool (3-5 worker), 但目前**不预先优化**.
 
-假设每数据集 50K 请求, 平均 prompt 长度等同测试 9 的 mid-long:
-- 6 × 50K = 300,000 请求
-- 300K / 1480 req/s = **203s ≈ 3.4 分钟**
+### 4.4 model_max_length 警告 (无需处理)
 
-**结论**: 单线程完全够, 不需要 multiprocessing 或 batch tokenize cache.
+transformers 对超过 `model_max_length=202752` 的 prompt 会打 warning, 但不会阻断:
+
+```
+Token indices sequence length is longer than the specified maximum sequence length
+for this model (274291 > 202752). Running this sequence through the model will
+result in indexing errors
+```
+
+我们的工具**只做 hash, 不喂模型**, 所以即使超 200k 也无副作用. 但用户确认 128k max, **不会触发**. P2 代码不需要 truncate.
 
 ---
 
@@ -287,11 +320,11 @@ print(f"avg tokens/prompt: {sum(len(tok.encode(p)) for p in prompts[:100])/100:.
 以下全部勾选后才能进 P2:
 
 - [x] GLM-5 tokenizer 在本机已成功加载 (✅ 2026-05-15, vocab=154820)
-- [ ] GLM-5 tokenizer 已在 Ascend dev 机预下载到本地 (避免 P4 时网络问题)
-- [ ] 6 个数据集 raw_prompt 抽样完成, chat_mode 决策已定 (**待用户在 Ascend 跑 `scripts/sample_raw_prompts.py` 后贴回**)
+- [ ] GLM-5 tokenizer 已在 Ascend dev 机预下载到本地 (P4 前完成: `hf download zai-org/GLM-5 tokenizer.json tokenizer_config.json chat_template.jinja --local-dir models/glm5_tokenizer`)
+- [x] chat_mode 决策已定 (✅ **wrap_user** 锁定, 用户口头确认 raw_prompt 全是原始输入)
 - [x] §1.5 阻断风险已确认无 (✅ 公开仓库)
 - [x] §2.2 chat_template apply 输出已验证可读 (✅ test 1-4 全过)
-- [x] §4 性能预估完成 (✅ 6 数据集 3.4 min)
+- [x] §4 性能预估完成 (✅ 考虑 128k tokens max, 6 数据集 35min-3.7h 视平均长度而定)
 
 ---
 
@@ -304,7 +337,9 @@ print(f"avg tokens/prompt: {sum(len(tok.encode(p)) for p in prompts[:100])/100:.
 | 本机预下载路径 | `models/glm5_tokenizer/` |
 | Ascend 同步方式 | `rsync` 或 `hf download` 同方式拉, 离线则 rsync `models/glm5_tokenizer/` |
 | `trust_remote_code` | **True** (因 `tokenizer_class=TokenizersBackend` 非标准) |
-| chat_mode 默认值 | **wrap_user** (待 §3 抽样后可能调整) |
+| chat_mode 默认值 | **wrap_user** (✅ 用户口头确认, 锁定; 6 数据集 raw_prompt 全是未处理原始输入) |
+| 单条 prompt 上限 | 128k tokens (用户提供, 不超 GLM-5 200K context) |
+| max_seq_len 处理 | **不 truncate**, 不喂模型只算 hash, transformers warning 可忽略 |
 | `add_generation_prompt` | **True** (模拟 prefill 输入, 与 vLLM 实际一致) |
 | 单条 tokenize 耗时 (中长 prompt) | ~0.7 ms |
 | 单条 tokenize 耗时 (短 prompt) | ~0.05 ms |
@@ -326,4 +361,6 @@ print(f"avg tokens/prompt: {sum(len(tok.encode(p)) for p in prompts[:100])/100:.
 | 2026-05-15 | transformers 5.8.1 `apply_chat_template(tokenize=True)` 返回 BatchEncoding (dict-like, 非 list) | 第一次实测 `len(out)` 误得 2 | 改"两步走": `apply_chat_template(tokenize=False)` 拿 string + `tokenizer.encode()` 拿 list[int]. 已记入 §6 P2 实现指引 |
 | 2026-05-15 | GLM-5 是 thinking 模型 (`GlmMoeDsaForCausalLM`), prefill 末尾追加 `<\|assistant\|><think>` | 5 tokens 固定 overhead, 但相同 token 序列在所有请求中都一样, 实际**提升**前缀命中率 | 文档记录, 不需特殊处理 |
 | 2026-05-15 | tokenizer_class=`TokenizersBackend` (非标准), 必须 `trust_remote_code=True` | 若 Ascend 不允许 trust_remote_code 会阻断 | 已加到 §6 决策表, P2 实现注意; 若 Ascend 阻断, fallback 是手动用 `tokenizers.Tokenizer.from_file("tokenizer.json")` 绕开 transformers AutoTokenizer |
-| 2026-05-15 | 实测中长 prompt 1480 req/s, 远超之前估算的 10K tok/s | 6 数据集预估 < 5 分钟 | 不需 multiprocessing |
+| 2026-05-15 | **初版性能预估错误** (3.4 min): 第一次按 "1480 req/s" 算, 没考虑 prompt 长度差异 | 实际生产 prompt 最大 128k tokens, 单条耗时与 tokens 数线性相关 | 重做 §4 预估, 给出 1k/10k/30k/64k 不同平均长度下的 6 数据集预估 (3 min - 3.7h) |
+| 2026-05-15 | 单条 274k tokens prompt 触发 `model_max_length` warning | 仅 transformers warning, 不阻断 | 我们只 hash 不喂模型, 忽略即可; 用户确认 max 128k, **不会触发** |
+| 2026-05-15 | **§3 数据集抽样跳过** | 用户口头确认 raw_prompt 全是原始输入 | chat_mode 直接锁定 wrap_user, `sample_raw_prompts.py` 留作未来新数据集工具 |

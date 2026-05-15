@@ -35,7 +35,8 @@
 | Tokenizer | **GLM-5 必须用 GLM-5 tokenizer** (无降级) |
 | Block size | `128 tokens` (vllm-ascend 强制) |
 | Hash 算法 | **SHA256 fallback** (`sha256(parent || ",".join(str(t) for t in tokens))`) — hash 函数不影响 hit_rate 数字 |
-| chat_mode | **wrap_user** (默认; P1 调研后可能调整) |
+| chat_mode | **wrap_user** (锁定; 用户确认 6 数据集 raw_prompt **全部是未经 chat_template 处理的原始输入**, 不需要抽样) |
+| 单条 prompt 上限 | **128k tokens** (用户提供, 与 GLM-5 model_max_length=202752 一致) |
 
 新旧两套工具**完全独立**, 4 个分层各自有测试单元. 输入: 6 个 GLM-5 生产 CSV (`/data/<model>/raw/<model>.csv`). 输出: 6 份 APP 级 `per_user_report.html`, 标识 "Token-Level".
 
