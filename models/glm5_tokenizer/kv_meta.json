@@ -1,0 +1,14 @@
+{
+  "_comment": "KV cache 单 token 字节数. 用于 token-level pipeline 的 cache 压力 GB/min 估算.",
+  "model": "zai-org/GLM-5",
+  "config_source": "huggingface.co/zai-org/GLM-5/raw/main/config.json (fetched 2026-05-18)",
+  "architecture": "MLA (Multi-head Latent Attention; DeepSeek-style DSA)",
+  "formula": "num_layers * (kv_lora_rank + qk_rope_head_dim) * dtype_bytes  (K/V 共享 latent, 不乘 2)",
+  "num_layers": 78,
+  "kv_lora_rank": 512,
+  "qk_rope_head_dim": 64,
+  "dtype": "bfloat16",
+  "dtype_bytes": 2,
+  "derivation": "78 * (512 + 64) * 2 = 89856",
+  "kv_bytes_per_token": 89856
+}

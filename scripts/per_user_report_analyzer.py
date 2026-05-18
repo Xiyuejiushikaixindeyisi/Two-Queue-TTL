@@ -454,7 +454,7 @@ def _estimate_uplift(
 
 def _make_reasons(
     hit_rate: float, n_chains: int, top_cov_pct: float, top_len: int,
-    unique_blocks: int, new_per_sec_p95: int, business: str,
+    unique_blocks: int, new_per_min_p95: int, business: str,
 ) -> list[str]:
     """Human-readable bullet list explaining the primary recommendation."""
     reasons = []
@@ -470,8 +470,11 @@ def _make_reasons(
         reasons.append(f"unique_blocks {unique_blocks:,} ≥ 1M, cache 容量先于 pin")
     elif unique_blocks >= 200_000:
         reasons.append(f"unique_blocks {unique_blocks:,} 较大, 容量需关注")
-    if new_per_sec_p95 >= 500:
-        reasons.append(f"insertion rate p95 = {new_per_sec_p95}/s 极高, 路由分流可能必要")
+    # 阈值 30000 block/min == 500 block/s (与原 v3 一致, 仅单位换算)
+    if new_per_min_p95 >= 30_000:
+        reasons.append(
+            f"insertion rate p95 = {new_per_min_p95:,}/min 极高, 路由分流可能必要"
+        )
     if business != "unknown":
         reasons.append(f"业务类型推断: {business}")
     return reasons
@@ -484,7 +487,8 @@ def compute_model_context(
     n_users_total: int | None = None,
     ts_parse_failed_count: int = 0,
     requests_per_min_q: dict | None = None,
-    new_unique_blocks_per_sec_q: dict | None = None,
+    new_unique_blocks_per_min_q: dict | None = None,
+    cache_pressure_gb_per_min_q: dict | None = None,
 ) -> dict:
     """Per-model cross-user signals + v3 aggregate metrics.
 
@@ -517,7 +521,8 @@ def compute_model_context(
             "trace_duration_caveat": "no selected users",
             "ts_parse_failed_count": ts_parse_failed_count,
             "requests_per_min_q": requests_per_min_q or {},
-            "new_unique_blocks_per_sec_q": new_unique_blocks_per_sec_q or {},
+            "new_unique_blocks_per_min_q": new_unique_blocks_per_min_q or {},
+            "cache_pressure_gb_per_min_q": cache_pressure_gb_per_min_q or {},
             "traffic_spikes": traffic_spikes or [],
             "spike_config": spike_config or {},
             "model_params_class": None,
@@ -607,7 +612,8 @@ def compute_model_context(
         "ts_parse_failed_count": ts_parse_failed_count,
         # v3: model-level quantile (for HTML reference lines + user vs model 对比)
         "requests_per_min_q": requests_per_min_q or {},
-        "new_unique_blocks_per_sec_q": new_unique_blocks_per_sec_q or {},
+        "new_unique_blocks_per_min_q": new_unique_blocks_per_min_q or {},
+        "cache_pressure_gb_per_min_q": cache_pressure_gb_per_min_q or {},
         # Traffic spike detection (filled by main from detect_traffic_spikes)
         "traffic_spikes":   traffic_spikes or [],
         "spike_config":     spike_config or {},
@@ -782,7 +788,7 @@ def _make_impl_steps_v2(
 
 def compute_step3_recommendation(
     report_stats: dict, chains: list[dict], inter_arrival: dict,
-    new_per_sec_q: dict, model_context: dict | None = None,
+    new_per_min_q: dict, model_context: dict | None = None,
     classifications: dict | None = None,
 ) -> dict:
     """Decide subtype recommendations per decision matrix §9.2.3 rules.
@@ -790,7 +796,7 @@ def compute_step3_recommendation(
     Inputs:
       report_stats:     user's stats dict (with share_of_model_unique filled)
       chains:           user's chain forest
-      new_per_sec_q:    new-block-per-second quantiles
+      new_per_min_q:    new-block-per-minute quantiles (v2026-05-18, was per-sec)
       model_context:    cross-user signals + model-level metrics (with
                         manual fields model_params_class / instance_count /
                         cache_capacity_blocks)
@@ -805,7 +811,7 @@ def compute_step3_recommendation(
     hit_rate = report_stats.get("ideal_hit_rate", 0.0)
     unique = report_stats.get("unique_blocks", 0)
     total_reqs = report_stats.get("total_requests", 0)
-    new_p95 = new_per_sec_q.get("p95", 0)
+    new_p95 = new_per_min_q.get("p95", 0)
 
     n_chains = len(chains)
     top_cov_pct = chains[0]["coverage_pct"] if chains else 0.0
@@ -1003,13 +1009,16 @@ def analyze_user(
     records = sorted(records, key=lambda r: (r[1], r[0]))
     n_total = len(records)
 
-    # Single pass: trie build + LCP/hit + new_block/s + req/min + gaps
+    # Single pass: trie build + LCP/hit + new_block/min + req/min + gaps
     root = TrieNode()
     seen_keys: set[bytes] = set()
     hit_blocks = 0
     total_blocks = 0
     empty_prompts = 0
-    new_per_sec: dict[int, int] = defaultdict(int)
+    # v2026-05-18: bucket new-unique-block insertion by minute (was second). 大多数
+    # reuse 间隔 P80≈60s; 按分钟分桶可让 quantile 不被空秒大量 padding 拉成 0,
+    # 同时单位 (block/min) 更符合人类感知 + 后续 GB/min 估算更直观。
+    new_per_min: dict[int, int] = defaultdict(int)
     req_per_min: dict[int, int] = defaultdict(int)
     inter_arrival: list[int] = []
     per_request_lcp: list[int] = []
@@ -1072,7 +1081,7 @@ def analyze_user(
         for k in keys:
             if k not in seen_keys:
                 seen_keys.add(k)
-                new_per_sec[ts] += 1
+                new_per_min[ts // 60] += 1
 
         trie_insert(root, keys, rid)
 
@@ -1086,44 +1095,57 @@ def analyze_user(
         "max": sorted_gaps[-1] if sorted_gaps else 0,
     }
 
-    # New-block/s quantiles — over FULL trace (padding zero seconds).
-    # Without padding, sparse traces (e.g., 15 active seconds out of 335)
-    # inflate p50/p95 because we'd be quantiling over non-zero seconds only.
-    # v2 fix (2026-05-14): use trace span to pad.
-    new_per_sec_vals = sorted(new_per_sec.values())
+    # New-block/min quantiles — over FULL trace span in minutes (padding zero minutes).
+    # Without padding, sparse traces would let quantile-over-nonzero inflate p50/p80;
+    # bucket-by-minute (v2026-05-18, was per-second) drastically reduces 0-padding
+    # weight so quantile aligns with chart visuals.
+    new_per_min_vals = sorted(new_per_min.values())
     if earliest_ts is not None and latest_ts is not None and latest_ts >= earliest_ts:
-        total_seconds = max(latest_ts - earliest_ts + 1, len(new_per_sec_vals))
+        total_minutes = max((latest_ts - earliest_ts) // 60 + 1, len(new_per_min_vals))
     else:
-        total_seconds = len(new_per_sec_vals)
-    n_zeros = max(0, total_seconds - len(new_per_sec_vals))
+        total_minutes = len(new_per_min_vals)
+    n_zeros = max(0, total_minutes - len(new_per_min_vals))
 
     def _padded_quant(pct: float) -> int:
-        if total_seconds == 0:
+        if total_minutes == 0:
             return 0
-        idx = (total_seconds - 1) * pct / 100.0
+        idx = (total_minutes - 1) * pct / 100.0
         lo = int(idx)
         if lo < n_zeros:
             return 0
-        return new_per_sec_vals[lo - n_zeros] if new_per_sec_vals else 0
+        return new_per_min_vals[lo - n_zeros] if new_per_min_vals else 0
 
     new_q = {
         "p50": _padded_quant(50),
+        "p80": _padded_quant(80),
         "p95": _padded_quant(95),
-        "max": new_per_sec_vals[-1] if new_per_sec_vals else 0,
+        "max": new_per_min_vals[-1] if new_per_min_vals else 0,
     }
 
-    # Time series (sorted by key)
+    # GB/min cache-pressure quantiles (token 模式才填; byte 模式 kv_bytes_per_token=None)
+    kv_bpt = getattr(encoder, "kv_bytes_per_token", None)
+    block_size_tokens = getattr(encoder, "block_size_tokens", args.block_size)
+    if kv_bpt is not None:
+        gib = 1024 ** 3
+        gb_q = {
+            k: round(v * block_size_tokens * kv_bpt / gib, 4)
+            for k, v in new_q.items()
+        }
+    else:
+        gb_q = {}
+
+    # Time series (sorted by key) — both series now keyed by minute
     req_per_min_series = [
         {"minute": m, "count": req_per_min[m]} for m in sorted(req_per_min)
     ]
-    new_per_sec_series = [
-        {"second": s, "count": new_per_sec[s]} for s in sorted(new_per_sec)
+    new_per_min_series = [
+        {"minute": m, "count": new_per_min[m]} for m in sorted(new_per_min)
     ]
     cumulative_unique: list[dict] = []
     running = 0
-    for entry in new_per_sec_series:
+    for entry in new_per_min_series:
         running += entry["count"]
-        cumulative_unique.append({"second": entry["second"], "total": running})
+        cumulative_unique.append({"minute": entry["minute"], "total": running})
 
     # LCP histogram (v3: tuple now (hist, quantiles, top10))
     histogram, lcp_quantiles, lcp_top10 = lcp_histogram(per_request_lcp)
@@ -1197,6 +1219,9 @@ def analyze_user(
             "hash_algo": getattr(encoder, "hash_algo", "sha256_chain"),
             "chat_mode": getattr(encoder, "chat_mode", None),
             "tokenizer_path": getattr(encoder, "tokenizer_path", None),
+            # v2026-05-18: KV cache 单 token 字节数 (None for byte mode / 缺 kv_meta.json);
+            # HTML §5 cache 压力读这里算 GB/min.
+            "kv_bytes_per_token": getattr(encoder, "kv_bytes_per_token", None),
         },
         "params": {
             "block_size":               args.block_size,
@@ -1224,7 +1249,8 @@ def analyze_user(
             "analyze_seconds":    round(time.time() - t0, 3),
         },
         "inter_arrival_gaps_seconds":   gap_q,
-        "new_unique_blocks_per_sec_q":  new_q,
+        "new_unique_blocks_per_min_q":  new_q,
+        "cache_pressure_gb_per_min_q":  gb_q,  # {} when byte mode / no kv_meta
         "lcp_distribution": {
             "quantiles":         lcp_quantiles,    # v3: now has p30 + p80
             "histogram":         histogram,
@@ -1237,8 +1263,8 @@ def analyze_user(
         "user_traffic_spikes": user_traffic_spikes,
         "time_series": {
             "requests_per_minute":          req_per_min_series,
-            "new_unique_blocks_per_second": new_per_sec_series,
-            "cumulative_unique_blocks":     cumulative_unique,
+            "new_unique_blocks_per_minute": new_per_min_series,
+            "cumulative_unique_blocks":     cumulative_unique,  # keyed by minute
         },
         "chain_forest_summary": chain_forest_summary,
         "caveats": [
@@ -1286,7 +1312,7 @@ def write_summary(
             "dominant_chain_length":      cs["dominant_chain_length"],
             "p50_gap":                    r["inter_arrival_gaps_seconds"]["p50"],
             "p95_gap":                    r["inter_arrival_gaps_seconds"]["p95"],
-            "new_block_per_sec_p95":      r["new_unique_blocks_per_sec_q"]["p95"],
+            "new_block_per_min_p95":      r["new_unique_blocks_per_min_q"]["p95"],
             "rec_primary":                rec.get("primary_algorithm", ""),
             "rec_companion":              rec.get("companion_algorithm", "") or "",
             "rec_difficulty":             rec.get("difficulty", ""),
@@ -1321,7 +1347,7 @@ def write_summary(
         # legacy
         "user_id", "request_count", "request_pct", "ideal_hit_rate",
         "chain_forest_count", "dominant_chain_cov_pct", "dominant_chain_length",
-        "p50_gap", "p95_gap", "new_block_per_sec_p95",
+        "p50_gap", "p95_gap", "new_block_per_min_p95",
         "rec_primary", "rec_companion", "rec_difficulty",
         # v2
         "chain_length_ratio", "share_of_model_unique",
@@ -1512,9 +1538,9 @@ def main() -> None:
         "threshold_multiplier": args.spike_threshold,
     }
 
-    # v3 §1: model-level quantile (req/min + new_block/s). 含 0 桶 padding.
+    # v3 §1: model-level quantile (req/min + new_block/min). 含 0 桶 padding.
     # req/min uses ALL users (model_req_per_min from pass-1, accurate).
-    # new_block/s sums Top-K user new_per_sec_series (近似, long-tail user 不计).
+    # new_block/min sums Top-K user new_per_min_series (近似, long-tail user 不计).
     def _padded_quantile(values: list[int], total_buckets: int) -> dict:
         """Quantile over values list, padded with zeros to total_buckets."""
         sorted_vals = sorted(values)
@@ -1538,31 +1564,42 @@ def main() -> None:
     # Model-level trace span buckets (含 0)
     if latest_ts_all >= earliest_ts_all and latest_ts_all > 0:
         model_total_minutes = (latest_ts_all // 60) - (earliest_ts_all // 60) + 1
-        model_total_seconds = latest_ts_all - earliest_ts_all + 1
     else:
         model_total_minutes = 1
-        model_total_seconds = 1
 
     # req/min quantile: pass-1 model_req_per_min covers all users
     model_req_per_min_q = _padded_quantile(
         list(model_req_per_min.values()), model_total_minutes,
     )
 
-    # new_block/s quantile: sum across Top-K selected users (per-second)
-    model_new_per_sec_combined: dict[int, int] = defaultdict(int)
+    # new_block/min quantile: sum across Top-K selected users (per-minute)
+    model_new_per_min_combined: dict[int, int] = defaultdict(int)
     for uid in selected:
-        for entry in user_reports[uid]["time_series"]["new_unique_blocks_per_second"]:
-            model_new_per_sec_combined[entry["second"]] += entry["count"]
-    model_new_per_sec_q = _padded_quantile(
-        list(model_new_per_sec_combined.values()), model_total_seconds,
+        for entry in user_reports[uid]["time_series"]["new_unique_blocks_per_minute"]:
+            model_new_per_min_combined[entry["minute"]] += entry["count"]
+    model_new_per_min_q = _padded_quantile(
+        list(model_new_per_min_combined.values()), model_total_minutes,
     )
+
+    # Model-level cache pressure GB/min (token 模式才有; 所有 user 共享同一 encoder)
+    model_gb_per_min_q: dict = {}
+    kv_bpt = getattr(encoder, "kv_bytes_per_token", None)
+    block_size_tokens = getattr(encoder, "block_size_tokens", args.block_size)
+    if kv_bpt is not None:
+        gib = 1024 ** 3
+        model_gb_per_min_q = {
+            k: round(v * block_size_tokens * kv_bpt / gib, 4)
+            for k, v in model_new_per_min_q.items()
+            if isinstance(v, (int, float))
+        }
 
     model_context = compute_model_context(
         user_reports, traffic_spikes=spikes, spike_config=spike_config,
         n_users_total=n_users_total,
         ts_parse_failed_count=ts_parse_failed,
         requests_per_min_q=model_req_per_min_q,
-        new_unique_blocks_per_sec_q=model_new_per_sec_q,
+        new_unique_blocks_per_min_q=model_new_per_min_q,
+        cache_pressure_gb_per_min_q=model_gb_per_min_q,
     )
 
     # Back-fill share_of_model_unique into each user's stats
@@ -1614,7 +1651,7 @@ def main() -> None:
             report["stats"],
             forest["chains"],
             report["inter_arrival_gaps_seconds"],
-            report["new_unique_blocks_per_sec_q"],
+            report["new_unique_blocks_per_min_q"],
             model_context=model_context,
             classifications=classifications,
         )

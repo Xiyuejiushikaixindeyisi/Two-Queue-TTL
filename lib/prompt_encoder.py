@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
-from lib.hf_tokenizer import apply_template, load_tokenizer
+from lib.hf_tokenizer import apply_template, load_kv_meta, load_tokenizer
 
 
 class PromptEncoder(Protocol):
@@ -38,6 +38,7 @@ class PromptEncoder(Protocol):
 
     name: str  # e.g. "byte_v1", "hf_token_v1", "glm5_token_v1" — JSON metadata + HTML
     block_unit: str  # "bytes" | "tokens" — drives downstream banner copy
+    kv_bytes_per_token: int | None  # None for byte encoder; from kv_meta.json for HF
 
     def encode(self, raw_prompt: str) -> list[bytes]:
         """raw_prompt → ordered list of 32-byte SHA-256 prefix-chain keys."""
@@ -53,6 +54,7 @@ class ByteLevelEncoder:
     name = "byte_v1"
     block_unit = "bytes"
     hash_algo = "sha256_chain"
+    kv_bytes_per_token: int | None = None  # byte 模式无 KV cache 估算
 
     def __init__(self, block_size_bytes: int = 128):
         self.block_size_bytes = block_size_bytes
@@ -97,6 +99,11 @@ class HFTokenEncoder:
         self.chat_mode = chat_mode
         self.tokenizer_path = tokenizer_path
         self.block_size_tokens = block_size_tokens
+        # KV cache 单 token 字节数, 用于 cache 压力 GB/min 估算
+        self.kv_meta = load_kv_meta(tokenizer_path)
+        self.kv_bytes_per_token = (
+            self.kv_meta.get("kv_bytes_per_token") if self.kv_meta else None
+        )
 
     def encode(self, raw_prompt: str) -> list[bytes]:
         token_ids = apply_template(self.tokenizer, raw_prompt, self.chat_mode)
@@ -176,5 +183,7 @@ def build_encoder_from_args(args) -> tuple[PromptEncoder, dict]:
         "hash_algo": encoder.hash_algo,
         "chat_mode": getattr(encoder, "chat_mode", None),
         "tokenizer_path": getattr(encoder, "tokenizer_path", None),
+        # KV cache 单 token 字节数 (None for byte mode / 缺 kv_meta.json)
+        "kv_bytes_per_token": getattr(encoder, "kv_bytes_per_token", None),
     }
     return encoder, meta

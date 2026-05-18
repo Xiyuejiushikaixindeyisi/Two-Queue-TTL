@@ -1,0 +1,14 @@
+{
+  "_comment": "KV cache 单 token 字节数. 用于 token-level pipeline 的 cache 压力 GB/min 估算.",
+  "model": "Qwen/Qwen3-8B",
+  "config_source": "huggingface.co/Qwen/Qwen3-8B/raw/main/config.json (fetched 2026-05-18)",
+  "architecture": "GQA",
+  "formula": "2 (K+V) * num_layers * num_kv_heads * head_dim * dtype_bytes",
+  "num_layers": 36,
+  "num_kv_heads": 8,
+  "head_dim": 128,
+  "dtype": "bfloat16",
+  "dtype_bytes": 2,
+  "derivation": "2 * 36 * 8 * 128 * 2 = 147456",
+  "kv_bytes_per_token": 147456
+}

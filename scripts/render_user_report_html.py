@@ -648,9 +648,32 @@ def render_model_section(model_report: dict | None) -> str:
     inv = model_report.get("reuse_inversion", False)
 
     rpm_q = model_report.get("requests_per_min_q") or {}
-    nps_q = model_report.get("new_unique_blocks_per_sec_q") or {}
+    npm_q = model_report.get("new_unique_blocks_per_min_q") or {}
+    gb_q  = model_report.get("cache_pressure_gb_per_min_q") or {}
     rpm_p80 = rpm_q.get("p80", "—")
-    nps_p80 = nps_q.get("p80", "—")
+    npm_p80 = npm_q.get("p80", "—")
+    gb_p80  = gb_q.get("p80")  # None when byte mode / no kv_meta
+
+    # v2026-05-18: ideal_hit_rate 文案根据 encoder block_unit 切换
+    # (token 模式与 vllm 一致; byte 模式仍是字节级上界)
+    ihr_block_unit = (model_report.get("encoder_meta") or {}).get("block_unit")
+    if ihr_block_unit == "tokens":
+        ihr_desc = "aggregate (sum hit / sum total); token 级 (与 vllm 一致)"
+    else:
+        ihr_desc = "aggregate (sum hit / sum total); 字节级上界, 详见 metrics_glossary §3"
+
+    # cache pressure stat: token 模式优先显示 GB/min, byte 模式显示 block/min
+    if gb_p80 is not None:
+        cache_label = "GB/min p80"
+        cache_value = f"{gb_p80:.3f}" if isinstance(gb_p80, (int, float)) else "—"
+        cache_desc = (
+            f"model-level cache pressure (block/min p80={npm_p80}); "
+            f"GB = blocks × {ihr_block_unit or '?'} × kv_bytes/token / 1024³"
+        )
+    else:
+        cache_label = "new_block/min p80"
+        cache_value = f"{npm_p80}"
+        cache_desc = "model-level cache pressure baseline (byte 模式无 GB 估算)"
 
     # v3 bug diagnostic
     caveat = model_report.get("trace_duration_caveat")
@@ -672,14 +695,12 @@ def render_model_section(model_report: dict | None) -> str:
         stat_item("n_users (total)",        str(n_users_total),
                   f"selected: {n_users_sel}; "
                   + ("multi-tenant" if multi else "single-tenant")),
-        stat_item("ideal_hit_rate",         f"{ihr*100:.2f}%",
-                  "aggregate (sum hit / sum total); 字节级上界, 详见 metrics_glossary §3"),
+        stat_item("ideal_hit_rate",         f"{ihr*100:.2f}%", ihr_desc),
         stat_item("rpm avg + p80",          f"{rpm:.1f} / {rpm_p80}",
                   f"over {dur:.1f} min"),
         stat_item("unique_rpm avg",         f"{urpm:.1f}",
                   "Top-K user sum (upper bound)"),
-        stat_item("new_block/s p80",        f"{nps_p80}",
-                  "model-level cache pressure baseline"),
+        stat_item(cache_label,              cache_value, cache_desc),
         stat_item("reuse_inversion_ratio",  str(inv_ratio),
                   "triggered" if inv else "not triggered"),
     ])
@@ -980,11 +1001,17 @@ def render_user_metrics(report: dict, total_requests: int) -> str:
     req_pct = reqs / total_requests * 100 if total_requests else 0.0
     share = s.get("share_of_model_unique") or 0.0
 
+    user_block_unit = (report.get("encoder_meta") or {}).get("block_unit")
+    if user_block_unit == "tokens":
+        ihr_user_desc = "vLLM block-level, user-internal (token 级, 与 vllm 一致)"
+    else:
+        ihr_user_desc = "vLLM block-level, user-internal (字节级上界)"
+
     items = [
         stat_item("requests", f"{reqs:,}",
                   f"{req_pct:.2f}% of {total_requests:,}"),
         stat_item("ideal hit rate", f"{s.get('ideal_hit_rate', 0)*100:.2f}%",
-                  "vLLM block-level, user-internal (字节级上界)"),
+                  ihr_user_desc),
         stat_item("total blocks", f"{s.get('total_blocks', 0):,}",
                   f"empty_prompts={s.get('empty_prompts', 0):,}"),
         stat_item("unique blocks", f"{s.get('unique_blocks', 0):,}",
@@ -1080,20 +1107,26 @@ def render_traffic_timeseries_v3(report: dict, model_report: dict | None) -> str
 
 
 def render_cache_pressure_v3(report: dict, model_report: dict | None) -> str:
-    """v3 §5: new_block/s 时序 + cumulative WS + WS 状态."""
-    ts = (report.get("time_series") or {}).get("new_unique_blocks_per_second") or []
+    """§5: new_block/min 时序 + cumulative WS + WS 状态 + token 模式 GB/min 估算.
+
+    v2026-05-18: 桶大小从 1 秒改为 1 分钟. 配合多数 reuse P80 ≈ 60s, 单位
+    更符合直觉, 而且大幅减少 0-bucket padding 对 quantile 的扭曲 (图上
+    P50/P80 不再贴地). token 模式追加 GB/min 估算 (来自 encoder_meta.
+    kv_bytes_per_token × block_size_tokens).
+    """
+    ts = (report.get("time_series") or {}).get("new_unique_blocks_per_minute") or []
     cumulative = (report.get("time_series") or {}).get("cumulative_unique_blocks") or []
     s = report.get("stats") or {}
     earliest = s.get("earliest_timestamp") or 0
     latest = s.get("latest_timestamp") or 0
     if latest >= earliest > 0:
-        total_sec = latest - earliest + 1
+        total_min = (latest - earliest) // 60 + 1
     else:
-        total_sec = max(1, len(ts))
+        total_min = max(1, len(ts))
 
-    user_q = _padded_quantile([d["count"] for d in ts], total_sec)
+    user_q = _padded_quantile([d["count"] for d in ts], total_min)
     model_p50 = (
-        (model_report or {}).get("new_unique_blocks_per_sec_q", {}).get("p50", 0)
+        (model_report or {}).get("new_unique_blocks_per_min_q", {}).get("p50", 0)
         if model_report else 0
     )
     extra = (
@@ -1102,33 +1135,69 @@ def render_cache_pressure_v3(report: dict, model_report: dict | None) -> str:
     )
 
     chart = svg_bar_chart(
-        ts, "second", "count",
-        title=f"New unique blocks per second · avg={user_q['avg']:g} /s",
-        x_label="second (since trace start)",
+        ts, "minute", "count",
+        title=f"New unique blocks per minute · avg={user_q['avg']:g} /min",
+        x_label="minute (since trace start)",
         y_label="blocks",
         quantiles=user_q,
         extra_ref_line=extra,
     )
 
+    q_table_rows = (
+        f'<tr><td class="label">new_block/min</td>'
+        f'<td>{user_q["p50"]:,}</td><td>{user_q["p80"]:,}</td>'
+        f'<td>{user_q["p95"]:,}</td><td>{user_q["max"]:,}</td></tr>'
+    )
+
+    # token 模式: 追加 GB/min 行 (新 block × block_size × kv_bytes/token / 1024³)
+    em = report.get("encoder_meta") or {}
+    kv_bpt = em.get("kv_bytes_per_token")
+    block_size = em.get("block_size", 128)
+    gb_note = ""
+    if kv_bpt:
+        gib = 1024 ** 3
+        gb_p50 = user_q["p50"] * block_size * kv_bpt / gib
+        gb_p80 = user_q["p80"] * block_size * kv_bpt / gib
+        gb_p95 = user_q["p95"] * block_size * kv_bpt / gib
+        gb_max = user_q["max"] * block_size * kv_bpt / gib
+        q_table_rows += (
+            f'<tr><td class="label">GB/min</td>'
+            f'<td>{gb_p50:.3f}</td><td>{gb_p80:.3f}</td>'
+            f'<td>{gb_p95:.3f}</td><td>{gb_max:.3f}</td></tr>'
+        )
+        tok_path = em.get("tokenizer_path") or "?"
+        gb_note = (
+            f'<div class="note" style="margin-top:6px; font-size:0.85em;">'
+            f'GB/min = blocks/min × block_size ({block_size} tokens) × '
+            f'kv_bytes_per_token ({kv_bpt:,} bytes) / 1024³. '
+            f'kv_bytes_per_token 取自 <code>{html.escape(tok_path)}/kv_meta.json</code>.'
+            '</div>'
+        )
+    else:
+        gb_note = (
+            '<div class="note" style="margin-top:6px; font-size:0.85em;">'
+            'byte 模式不估算 GB (block 是 raw_prompt 字节, 与 KV cache 内存占用无关). '
+            '需要 GB 估算请用 <code>--encoder hf_token --tokenizer-path '
+            'models/&lt;name&gt;_tokenizer</code> 重跑.'
+            '</div>'
+        )
+
     q_table = (
         '<table style="margin-top:8px; font-size:0.9em;">'
         '<tr><th>quantile</th><th>P50</th><th>P80</th><th>P95</th><th>Max</th></tr>'
-        f'<tr><td class="label">new_block/s</td>'
-        f'<td>{user_q["p50"]:,}</td><td>{user_q["p80"]:,}</td>'
-        f'<td>{user_q["p95"]:,}</td><td>{user_q["max"]:,}</td></tr>'
+        + q_table_rows +
         '</table>'
     )
 
-    # Cumulative WS line + state
+    # Cumulative WS line + state (cumulative series also keyed by minute now)
     cumulative_block = ""
     if cumulative:
         chart_cumul = svg_line_chart(
-            cumulative, "second", "total",
+            cumulative, "minute", "total",
             title=f"Cumulative unique blocks · final = {cumulative[-1]['total']:,}",
-            x_label="second (since trace start)",
+            x_label="minute (since trace start)",
             y_label="unique blocks",
         )
-        # WS state
         status, msg = _compute_ws_state_simple(cumulative)
         state_cls = {
             "converged": "ws-converged",
@@ -1140,19 +1209,13 @@ def render_cache_pressure_v3(report: dict, model_report: dict | None) -> str:
 <div class="{state_cls}">WS 状态: {msg}</div>
 '''
 
-    gb_todo = (
-        '<div class="tbd-note">GB 估计 — TODO: 待 model_report.json 补 '
-        '<code>kv_bytes_per_token</code> + <code>tokens_per_byte_avg</code>. '
-        '详见 <code>metrics_glossary.md §6</code>.</div>'
-    )
-
     return f"""
 <h2>5. cache 压力</h2>
 <div class="ts-block">
   <div class="ts-chart">{chart}</div>
-  {_ts_quantile_cards_v3(user_q, "(blocks/s)")}
+  {_ts_quantile_cards_v3(user_q, "(blocks/min)")}
   {q_table}
-  {gb_todo}
+  {gb_note}
   {cumulative_block}
 </div>
 """
@@ -1160,24 +1223,27 @@ def render_cache_pressure_v3(report: dict, model_report: dict | None) -> str:
 
 def _compute_ws_state_simple(cumulative: list[dict], threshold_pct: float = 5.0,
                               tail_minutes: int = 5) -> tuple[str, str]:
-    """Simplified WS state — last tail_minutes slope vs avg slope."""
+    """Simplified WS state — last tail_minutes slope vs avg slope.
+
+    v2026-05-18: cumulative entries are keyed by 'minute' now (was 'second').
+    The ratio comparison is scale-invariant, so only the field name needs to change.
+    """
     if len(cumulative) < 2:
         return ("insufficient", "数据不足")
-    pts = sorted(cumulative, key=lambda d: d["second"])
-    t_start = pts[0]["second"]
-    t_end = pts[-1]["second"]
+    pts = sorted(cumulative, key=lambda d: d["minute"])
+    t_start = pts[0]["minute"]
+    t_end = pts[-1]["minute"]
     total = pts[-1]["total"]
     duration = t_end - t_start
     if duration <= 0:
         return ("insufficient", "trace span = 0")
     avg_slope = total / duration
 
-    tail_secs = tail_minutes * 60
-    tail_cut = t_end - tail_secs
-    tail_pts = [p for p in pts if p["second"] >= tail_cut]
+    tail_cut = t_end - tail_minutes
+    tail_pts = [p for p in pts if p["minute"] >= tail_cut]
     if len(tail_pts) < 2:
         return ("insufficient", f"trace span < {tail_minutes} min × 2")
-    tail_t = tail_pts[-1]["second"] - tail_pts[0]["second"]
+    tail_t = tail_pts[-1]["minute"] - tail_pts[0]["minute"]
     if tail_t == 0:
         return ("insufficient", "尾部时间窗为 0")
     tail_slope = (tail_pts[-1]["total"] - tail_pts[0]["total"]) / tail_t

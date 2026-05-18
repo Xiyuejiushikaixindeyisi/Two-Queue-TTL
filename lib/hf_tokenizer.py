@@ -34,6 +34,27 @@ _VALID_MODES = ("raw", "wrap_user", "messages")
 _DEFAULT_MODE = "wrap_user"
 
 
+def load_kv_meta(tokenizer_path: str | Path) -> dict | None:
+    """读 models/<name>_tokenizer/kv_meta.json (若存在).
+
+    用于 cache 压力 GB/min 估算 (kv_bytes_per_token 字段). 缺失时返回 None,
+    pipeline 仍能跑, 只是不输出 GB 列.
+
+    JSON schema (必须字段): kv_bytes_per_token (int). 其它 (model / formula /
+    num_layers / dtype) 是 audit 信息, 不影响计算.
+    """
+    meta_path = Path(tokenizer_path) / "kv_meta.json"
+    if not meta_path.is_file():
+        return None
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    if "kv_bytes_per_token" not in meta:
+        raise ValueError(
+            f"{meta_path}: missing required field 'kv_bytes_per_token'"
+        )
+    return meta
+
+
 def load_tokenizer(model_path: str | Path) -> Any:
     """Load an HF tokenizer from a local directory or HF repo id.
 
