@@ -1009,12 +1009,16 @@ def analyze_user(
     records = sorted(records, key=lambda r: (r[1], r[0]))
     n_total = len(records)
 
-    # Single pass: trie build + LCP/hit + new_block/min + req/min + gaps
+    # Single pass: trie build + LCP/hit + new_block/min + req/min + gaps +
+    # prompt 长度统计 (用于阶段 2 txt 场景快速看输入规模)
     root = TrieNode()
     seen_keys: set[bytes] = set()
     hit_blocks = 0
     total_blocks = 0
     empty_prompts = 0
+    max_prompt_chars = 0
+    max_prompt_bytes = 0
+    total_prompt_bytes = 0
     # v2026-05-18: bucket new-unique-block insertion by minute (was second). 大多数
     # reuse 间隔 P80≈60s; 按分钟分桶可让 quantile 不被空秒大量 padding 拉成 0,
     # 同时单位 (block/min) 更符合人类感知 + 后续 GB/min 估算更直观。
@@ -1051,6 +1055,14 @@ def analyze_user(
             root.count += 1
             per_request_lcp.append(0)
             continue
+
+        # 长度统计 (chars + utf-8 bytes), 用于 §3 user metrics max prompt 卡片
+        n_chars = len(prompt)
+        n_bytes = len(prompt.encode("utf-8"))
+        total_prompt_bytes += n_bytes
+        if n_chars > max_prompt_chars:
+            max_prompt_chars = n_chars
+            max_prompt_bytes = n_bytes
 
         # Step 1.6: delegate Layer 2-4 to encoder.
         # byte encoder is equivalent to split_blocks + compute_prefix_path_keys.
@@ -1246,6 +1258,13 @@ def analyze_user(
             "unique_rpm_avg":   round(unique_rpm_avg, 4),
             # share_of_model_unique filled in by main() after pass 2
             "share_of_model_unique": None,
+            # v2026-05-18: prompt 长度 (chars + utf-8 bytes), 用于 §3 HTML
+            "max_prompt_chars":   max_prompt_chars,
+            "max_prompt_bytes":   max_prompt_bytes,
+            "avg_prompt_bytes":   (
+                round(total_prompt_bytes / (n_total - empty_prompts), 1)
+                if (n_total - empty_prompts) > 0 else 0.0
+            ),
             "analyze_seconds":    round(time.time() - t0, 3),
         },
         "inter_arrival_gaps_seconds":   gap_q,

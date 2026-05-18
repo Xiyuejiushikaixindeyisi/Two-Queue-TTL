@@ -126,6 +126,10 @@ def main() -> None:
                    help="--user-id-from=map-json 时, 指向 JSON 文件: {subdir: user_id}")
     p.add_argument("--encoding", type=str, default="utf-8",
                    help="txt 文件编码 (默认 utf-8)")
+    p.add_argument("--request-id-mode", type=str, default="sequential",
+                   choices=["sequential", "filename"],
+                   help="request_id 生成方式 (默认 sequential = r-000001/r-000002/...; "
+                        "filename = txt 文件名去 .txt, 中文文件名时不推荐)")
     args = p.parse_args()
 
     if not args.input_dir.is_dir():
@@ -150,13 +154,22 @@ def main() -> None:
     decode_errors = 0
     seen_request_ids: dict[str, str] = {}  # request_id → first-seen subdir
     duplicate_request_ids: list[tuple[str, str, str]] = []  # (rid, first_sub, dup_sub)
+    # Prompt 长度统计 (chars / utf-8 bytes), 用于阶段 2 快速看数据规模
+    max_prompt_chars = 0
+    max_prompt_bytes = 0
+    max_prompt_file: str | None = None
+    total_prompt_bytes = 0
 
     with open(args.output_csv, "w", encoding="utf-8", newline="") as fout:
         writer = csv.writer(fout)
         writer.writerow(["request_id", "user_id", "raw_prompt", "timestamp"])
 
-        for subdir_name, txt_path in iter_txt_files(args.input_dir):
-            request_id = txt_path.stem
+        for seq_idx, (subdir_name, txt_path) in enumerate(iter_txt_files(args.input_dir), 1):
+            if args.request_id_mode == "sequential":
+                request_id = f"r-{seq_idx:06d}"
+            else:  # filename
+                request_id = txt_path.stem
+
             try:
                 raw_prompt = txt_path.read_text(encoding=args.encoding)
             except UnicodeDecodeError as e:
@@ -166,6 +179,14 @@ def main() -> None:
                 continue
             if not raw_prompt:
                 empty_files += 1
+            else:
+                n_chars = len(raw_prompt)
+                n_bytes = len(raw_prompt.encode("utf-8"))
+                total_prompt_bytes += n_bytes
+                if n_chars > max_prompt_chars:
+                    max_prompt_chars = n_chars
+                    max_prompt_bytes = n_bytes
+                    max_prompt_file = txt_path.name
 
             if request_id in seen_request_ids:
                 duplicate_request_ids.append(
@@ -190,12 +211,20 @@ def main() -> None:
     print("\n=== conversion summary ===")
     print(f"input:        {args.input_dir}")
     print(f"output:       {args.output_csv}")
+    print(f"rid mode:     {args.request_id_mode}")
     print(f"rows written: {rows_written}")
     print(f"empty files:  {empty_files}")
     print(f"decode errs:  {decode_errors}")
+    if max_prompt_chars > 0:
+        avg_bytes = total_prompt_bytes / max(1, rows_written - empty_files)
+        print(f"max prompt:   {max_prompt_chars:,} chars / {max_prompt_bytes:,} bytes  "
+              f"({max_prompt_file!r})")
+        print(f"avg prompt:   {avg_bytes:,.0f} bytes  (total {total_prompt_bytes:,} bytes / "
+              f"{rows_written - empty_files:,} non-empty rows)")
     if duplicate_request_ids:
         print(f"\n⚠ duplicate request_ids: {len(duplicate_request_ids)} "
-              f"(same file stem across subdirs — CSV 内会有重名 rid)")
+              f"(same file stem across subdirs — CSV 内会有重名 rid; "
+              f"用 --request-id-mode sequential 可避免)")
         for rid, sub_a, sub_b in duplicate_request_ids[:5]:
             print(f"    {rid}: first in {sub_a!r}, again in {sub_b!r}")
         if len(duplicate_request_ids) > 5:

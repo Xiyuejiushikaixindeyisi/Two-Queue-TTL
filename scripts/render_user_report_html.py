@@ -1021,11 +1021,23 @@ def render_user_metrics(report: dict, total_requests: int) -> str:
     else:
         unique_sub = f"占模型 Top-K unique: {share*100:.2f}% (byte 模式无 GB 估算)"
 
+    # v2026-05-18: prompt 长度卡片 (raw_prompt 最长字符数 + 字节数, 平均字节数)
+    max_chars = s.get("max_prompt_chars", 0)
+    max_bytes = s.get("max_prompt_bytes", 0)
+    avg_bytes = s.get("avg_prompt_bytes", 0)
+    if max_chars > 0:
+        prompt_len_value = f"{max_chars:,} chars"
+        prompt_len_sub = f"max {max_bytes:,} B (utf-8) · avg {avg_bytes:,.0f} B/req"
+    else:
+        prompt_len_value = "—"
+        prompt_len_sub = "no non-empty prompts"
+
     items = [
         stat_item("requests", f"{reqs:,}",
                   f"{req_pct:.2f}% of {total_requests:,}"),
         stat_item("ideal hit rate", f"{s.get('ideal_hit_rate', 0)*100:.2f}%",
                   ihr_user_desc),
+        stat_item("max prompt length", prompt_len_value, prompt_len_sub),
         stat_item("total blocks", f"{s.get('total_blocks', 0):,}",
                   f"empty_prompts={s.get('empty_prompts', 0):,}"),
         stat_item("unique blocks", f"{unique_blocks:,}", unique_sub),
