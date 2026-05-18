@@ -1001,11 +1001,25 @@ def render_user_metrics(report: dict, total_requests: int) -> str:
     req_pct = reqs / total_requests * 100 if total_requests else 0.0
     share = s.get("share_of_model_unique") or 0.0
 
-    user_block_unit = (report.get("encoder_meta") or {}).get("block_unit")
+    em = report.get("encoder_meta") or {}
+    user_block_unit = em.get("block_unit")
     if user_block_unit == "tokens":
         ihr_user_desc = "vLLM block-level, user-internal (token 级, 与 vllm 一致)"
     else:
         ihr_user_desc = "vLLM block-level, user-internal (字节级上界)"
+
+    # v2026-05-18: 该 user 当天 unique block 累计 KV cache 字节数 (token 模式才填)
+    kv_bpt = em.get("kv_bytes_per_token")
+    block_size = em.get("block_size", 128)
+    unique_blocks = s.get("unique_blocks", 0)
+    if kv_bpt:
+        total_gb = unique_blocks * block_size * kv_bpt / (1024 ** 3)
+        unique_sub = (
+            f"占模型 Top-K unique: {share*100:.2f}% · "
+            f"≈ {total_gb:.3f} GB total ({block_size} tok × {kv_bpt:,} B/tok)"
+        )
+    else:
+        unique_sub = f"占模型 Top-K unique: {share*100:.2f}% (byte 模式无 GB 估算)"
 
     items = [
         stat_item("requests", f"{reqs:,}",
@@ -1014,8 +1028,7 @@ def render_user_metrics(report: dict, total_requests: int) -> str:
                   ihr_user_desc),
         stat_item("total blocks", f"{s.get('total_blocks', 0):,}",
                   f"empty_prompts={s.get('empty_prompts', 0):,}"),
-        stat_item("unique blocks", f"{s.get('unique_blocks', 0):,}",
-                  f"占模型 Top-K unique: {share*100:.2f}%"),
+        stat_item("unique blocks", f"{unique_blocks:,}", unique_sub),
         stat_item("hit blocks", f"{s.get('hit_blocks', 0):,}",
                   f"avg blocks/req: {s.get('avg_blocks_per_request', 0):.2f}"),
         stat_item("rpm / unique_rpm",
