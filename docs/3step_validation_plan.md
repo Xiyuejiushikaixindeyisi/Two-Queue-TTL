@@ -3,9 +3,9 @@
 > **本文档为持续维护的实验路线图**。所有阶段实施进展、参数选择、中间结论、决策点变更必须及时回写本文件。
 > 上下文一旦丢失，本文档应足以让任何接手者完整理解当前位置和下一步动作。
 >
-> **当前焦点模型：** DeepSeek-V3.1-8K (DS-8K)
+> **当前焦点：** 多模型 funnel 筛选 + 选定场景出 HTML (3 阶段工作流见 [`USAGE.md`](../USAGE.md))
 > **创建时间：** 2026-04-30
-> **最近更新：** 2026-05-08
+> **最近更新：** 2026-05-18
 
 ---
 
@@ -14,21 +14,23 @@
 | Step | 状态 | 关键产出 / 阻塞点 |
 |------|------|------------------|
 | **1.1 全局 chain 检测** | ✅ 完工 | `scripts/verify_chain_path_closure.py` |
-| **1.2 per-user chain** | ✅ 完工 | `scripts/per_user_chain_analyzer.py` |
-| **1.2.0 阈值扫描可视化** | ✅ 完工 | `scripts/chain_threshold_sweep.py` |
-| **1.2 HTML 渲染器** | ✅ 完工 | `scripts/render_chains_html.py` |
-| **1.3 跨时间稳定性** | ⏸️ 等数据落地 | 骨架就位（`scripts/chain_stability_analyzer.py`，2026-05-07）；命名锁定 `dsk8k_24h_0506` + `dsk8k_24h_0507`（5.6/5.7 两份独立 24h 采样，替代原 `2d_10k` 槽位，2026-05-08） |
+| **1.2 per-user chain + 阈值扫描 + HTML 渲染** | ✅ 完工 | `scripts/per_user_chain_analyzer.py` (内置 21 点 sweep) + `scripts/render_chains_html.py` |
+| **1.3 跨时间稳定性** | ⏸️ 等数据落地 | 骨架就位 `scripts/chain_stability_analyzer.py`; 需 2 份独立 24h 采样 (任意模型) |
+| **1.5 Per-user 深度报告 + chain forest** | ✅ 完工 | `scripts/per_user_report_analyzer.py` + `scripts/render_user_report_html.py` + `scripts/multi_chain_finder.py`; 9 模型 21 user 实测 |
+| **1.6 Token-level 编码 (与 vLLM 一致)** | ✅ 完工 | `lib/prompt_encoder.HFTokenEncoder` + `lib/hf_tokenizer.py`; GLM-5 / Qwen3 tokenizer + `kv_meta.json` vendor; HTML 启用 GB/min + 当天 unique GB total (见 [`step1_6_token_level_experiment_plan.md`](step1_6_token_level_experiment_plan.md)) |
+| **1.7 Funnel 工具集成 (USAGE.md 3 阶段)** | ✅ 完工 | 阶段 1 `scripts/target_users_hit_rate.py` (跨数据集 auto-top-k + GB/min) + 阶段 2 `scripts/txt_tree_to_csv.py` (txt 直通) + 阶段 3 `scripts/v2_run_pipeline.py` (per-user HTML orchestrator); 完整使用指南 [`USAGE.md`](../USAGE.md) |
 | **Step 2 API 测试** | ⏸️ 阻塞 | 1.3 验证 chain 跨日 Jaccard ≥ 0.7 后启动 |
 | **Step 3 算法设计** | 🚫 禁止启动 | Step 1.3 + Step 2 全部完成后才允许 |
 
-**最新决议（2026-04-30）：** branch_threshold default 修订 0.95 → 0.45。
-**第二次修订（2026-05-12）：** branch_threshold default 再次修订 0.45 → **0.25**（生产数据两次实证 0.45 过严：DS-8K 5.6 边界 case + 7 模型跨数据集多 chain 漏识；详见 portraits §3.8）。
-**DS-8K 实证：** 56-block chain，41.2% 覆盖；详见 [`dsk8k_step1_findings.md`](dsk8k_step1_findings.md)。
-**通用 SOP：** 拿到新数据集后的端到端操作流程见 [`step1_runbook.md`](step1_runbook.md)（2026-05-08）。
-**多模型画像（7 模型）：** 二维分类、复用倒置、chain ≠ 命中率，详见 [`model_portraits.md`](model_portraits.md)（2026-05-11）。**DS-8K 是 7 种画像之一，不是普适基线。**
-**Step 1.5（编码完成，待生产数据验证）：** Per-user 深度报告 + multi-chain forest，设计见 [`per_user_research_design.md`](per_user_research_design.md)（2026-05-11，D1–D8 全部 ack）；三个脚本 `multi_chain_finder.py` / `per_user_report_analyzer.py` / `render_user_report_html.py` 已就位（2026-05-11，本地合成 trace smoke test 通过）。
-**Step 3 算法决策矩阵：** 5 维评估 × 4 算法（路由 / 淘汰 / 池化 / prompt 修改）的入口文档见 [`step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md)（2026-05-12，21 用户全部分类完毕；portraits §2 二维分类已简化为指针）。
-**完整进度日志：** §7。
+**关键参数 / 设计决议** (按时间倒序):
+- **2026-05-18 (Step 1.7)**: funnel 工具补齐 (`target_users_hit_rate` auto-top-k + GB/min 列, `txt_tree_to_csv` sequential rid, `per_user_report_analyzer` max_prompt_length, `render_user_report_html` token 级文案 + GB/min 表 + unique GB total). 旧"DS-8K 中心化"叙事弃用, 改为多模型 funnel 主线.
+- **2026-05-18 (Step 1.6)**: token-level encoder 主线化. 引入 `HFTokenEncoder` (任意 HF tokenizer), vendor GLM-5 (MLA, 89,856 B/tok) + Qwen3 (GQA, 147,456 B/tok), 配套 `kv_meta.json` 启用 GB/min 真实估算. byte_v1 保留作 regression baseline. quantile bucket 从 second 改 minute, 配合 reuse P80 ≈ 60s 更直观.
+- **2026-05-12**: branch_threshold default 0.45 → **0.25** (生产数据两次实证 0.45 过严: 边界 case + 7 模型跨数据集 chain 漏识).
+- **2026-05-12**: Step 3 算法决策矩阵成型 (5 维 × 4 算法, 21 用户分类), 见 [`step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md).
+- **2026-04-30**: branch_threshold default 0.95 → 0.45.
+
+**完整进度日志:** §7.
+**历史 spec / 时间快照:** [`archive/`](archive/) (DS-8K findings / model_portraits / 各 HTML redesign spec / step1_runbook 等).
 
 ---
 
@@ -40,20 +42,25 @@
 - **Step 1（实验验证）和 Step 2（API 测试）必须沉淀为可复用的通用分析模块**，能够对接任意模型的 trace 与任意模型实例的 API
 - **Step 3（算法设计）允许针对具体模型定制**，但消费的输入与产出的输出应符合 Step 1/2 定义的契约
 
-DS-8K 是当前的具体应用对象，不是平台的设计目标。
+当前以"多模型 funnel 筛选 → 选定场景出 HTML"为工作流；任何具体模型 (GLM-V5 / Qwen-V3 / DS-V3 等) 都是应用对象，不是平台设计目标。
 
 ### 0.1 关键技术约束
 
-- **离线运行：** 分析平台必须能在断网环境下运行（数据私有、机器不联网）。禁止任何运行时下载 / 在线模型加载
-- **Tokenizer 自由：** 不依赖任何 LLM 官方 tokenizer。chunking 方法只需"在所有数据上保持一致"即可保证 chain 分析正确性（utf8_bytes / 字节切片均可）
-- **Raw CSV 标准格式（用户保证所有采样数据集遵循此格式）：**
+- **离线运行**: 分析平台必须能在断网环境下运行 (数据私有、机器不联网). 禁止任何运行时下载 / 在线模型加载. tokenizer + kv_meta.json 通过 **git vendor 到 `models/<name>_tokenizer/`** 同步, 仍 air-gapped 友好 (`git pull` 即用).
+- **编码器双轨制**:
+  - `byte_v1` (regression baseline): utf8 字节切片 (128 B/block) + SHA-256 链, 不依赖 tokenizer. **仅作回归测试**, hit_rate 比 vLLM 真实数字系统性偏高 0-30pp.
+  - `hf_token_v1` (主线, 与 vLLM 一致): HF AutoTokenizer + chat_template + 128-token 切片 + SHA-256 chain fallback hash. 配套 `kv_meta.json` 启用真实 GB/min KV cache 压力估算. 当前 vendor: GLM-5 (MLA, 89,856 B/tok) + Qwen3 (GQA, 147,456 B/tok).
+- **Raw CSV 标准格式** (用户保证所有采样数据集遵循):
   | 列序 | 列名 | 含义 |
   |------|------|------|
-  | 1 | `request_id` | 请求 ID（唯一） |
-  | 2 | `user_id` | 租户 ID（实为 product_id，每模型 ≤ 37 个） |
+  | 1 | `request_id` | 请求 ID (唯一) |
+  | 2 | `user_id` | 租户 ID (实为 product_id, 每模型 ≤ 37 个) |
   | 3 | `raw_prompt` | 原始 prompt 文本 |
-  | 4 | `timestamp` | 请求到达时间戳（秒级精度） |
-- **Block 切分单位：** 默认 `block_size=128 字节`（utf8_bytes 后端），不映射到真实 token 数
+  | 4 | `timestamp` | 请求到达时间戳 (秒级精度); 缺失时 hit_rate/chain/LCP 正常, spike/rpm/GB-min 时序失效但 caveat 提示 |
+
+  列名支持中文别名 (`请求ID` / `租户ID` / `请求参数`) + UTF-8 BOM, 由 `lib/` 自动适配.
+- **txt 数据集 (无 timestamp 的同事散文件)**: 通过 `scripts/txt_tree_to_csv.py` 转 4 列 CSV (sequential rid + fixed user_id), 之后走标准 pipeline; 详见 [`USAGE.md`](../USAGE.md) 阶段 2.
+- **Block 切分单位**: 默认 `block_size=128` (单位由 encoder 决定: byte_v1 是字节, hf_token_v1 是 tokens).
 
 ---
 
@@ -300,30 +307,41 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 
 ## 5. 模块复用性矩阵
 
-| 模块 | Step 1 | Step 2 | Step 3 | 跨模型复用 |
-|------|--------|--------|--------|-----------|
-| `verify_chain_path_closure.py` | ✓ | | | ✓ |
-| `chain_threshold_sweep.py` | ✓ | | | ✓ |
-| `per_user_chain_analyzer.py` | ✓ | | | ✓ |
-| `render_chains_html.py` | ✓ | | | ✓ |
-| `chain_stability_analyzer.py` | ✓ | | | ✓ |
-| `step1_summary.py` | ✓ | | | ✓ |
-| `probe_cache_capacity.py` | | ✓ | | ✓ |
-| `replay_to_api.py` | | ✓ | | ✓（需各家 API 适配层） |
-| `block_lifecycle_analyzer.py` | | ✓ | ✓ | ✓ |
-| `reuse_efficiency_analyzer.py` | | ✓ | ✓ | ✓ |
+| 模块 | Step | 跨模型复用 | 说明 |
+|------|------|-----------|------|
+| `lib/prompt_encoder.py` (`HFTokenEncoder` / `ByteLevelEncoder` / `build_encoder_from_args`) | 1.6 | ✓ | encoder 抽象, 任何 HF tokenizer + byte 双轨 |
+| `lib/hf_tokenizer.py` (`load_tokenizer` / `apply_template` / `load_kv_meta`) | 1.6 | ✓ | AutoTokenizer + chat_template + kv_meta.json |
+| `scripts/target_users_hit_rate.py` (阶段 1) | 1.7 | ✓ | 跨数据集 auto-top-k + GB/min long 表 |
+| `scripts/txt_tree_to_csv.py` (阶段 2) | 1.7 | ✓ | txt 树 → 4 列 CSV, sequential rid + max prompt 统计 |
+| `scripts/v2_run_pipeline.py` (阶段 2+3 orchestrator) | 1.5 + 1.6 | ✓ | per_user_report_analyzer + render_user_report_html 两遍 |
+| `scripts/per_user_report_analyzer.py` (内部) | 1.5 + 1.6 | ✓ | 单数据集 → user_summary.json + per-user user_report.json |
+| `scripts/render_user_report_html.py` (内部) | 1.5 + 1.6 | ✓ | per-user user_report.html (7 节) + cross_user_summary.html |
+| `scripts/per_user_chain_analyzer.py` (阶段 3 model-level) | 1.2 | ✓ | model-level chain + 内置 21 点 threshold sweep (`--no-threshold-sweep` 关闭) |
+| `scripts/render_chains_html.py` (阶段 3 model-level) | 1.2 | ✓ | per_user_chains.html (含 threshold sweep 图) |
+| `scripts/multi_chain_finder.py` | 1.5 | ✓ | chain forest primitive |
+| `scripts/verify_chain_path_closure.py` | 1.1 | ✓ | LCP 验证 (1.2 替代后较少单独使用) |
+| `scripts/chain_threshold_sweep.py` | 1.2.0 | ✓ | standalone sweep (已被 chain_analyzer 内置, 保留向后兼容) |
+| `scripts/chain_stability_analyzer.py` | 1.3 | ✓ | 跨时间稳定性 (等数据) |
+| `scripts/probe_cache_capacity.py` | 2 | ✓ | (Step 2 待启动) |
+| `scripts/replay_to_api.py` | 2 | ✓ | (Step 2 待启动, 需各家 API 适配层) |
+| `scripts/block_lifecycle_analyzer.py` | 2 + 3 | ✓ | (Step 2 待启动) |
+| `scripts/reuse_efficiency_analyzer.py` | 2 + 3 | ✓ | (Step 2 待启动) |
 
-所有 Step 1/2 模块设计为通用工具：输入 trace CSV / API 配置 + 必要参数即可对任意模型使用。Step 3 模块允许针对具体模型定制。
+所有 Step 1/2 模块设计为通用工具: 输入 trace CSV / API 配置 + 必要参数即可对任意模型使用. Step 3 模块允许针对具体模型定制.
 
 ---
 
-## 6. Trace 数据采集计划
+## 6. Trace 数据采集
 
-| 数据集 | 描述 | 用途 | 状态 | 路径 |
-|--------|------|------|------|------|
-| `dsk8k_24h_0506` | 5.6 全天（24h 窗口）随机采样 | Step 1.3 跨日稳定性 day1 | ⏳ 等数据落地 | `data/dsk8k_24h_0506/raw/*.csv` |
-| `dsk8k_24h_0507` | 5.7 全天（24h 窗口）随机采样 | Step 1.3 跨日稳定性 day2 | ⏳ 等数据落地 | `data/dsk8k_24h_0507/raw/*.csv` |
-| 旧 DS-8K 4/24 9–11 | 已转换 trace | 旧基线对照（可选） | ✅ 已有 | `data/deepseek_v3.1_8k/` |
+通用约定: 所有 trace CSV 放 `data/<model_dir>/raw/*.csv`, 多个 csv 视为同一数据集 (字典序拼接). 详见 [`data/README.md`](../data/README.md).
+
+| 类型 | 来源 | 用途 |
+|---|---|---|
+| 生产 trace (CSV) | 各模型生产采样 (4 列含 timestamp) | 阶段 1 跨数据集筛选 + 阶段 3 完整 HTML 分析 |
+| txt 散文件 (无 timestamp) | 同事手工导出 (1 txt = 1 请求, 文件名任意含中文) | 阶段 2 直接进 HTML, 走 `txt_tree_to_csv.py` 转 CSV |
+| 跨时间双采样 (Step 1.3 阻塞) | 任意模型 2 份独立 24h 采样 | 跨日 Jaccard 稳定性验证 |
+
+历史已有数据集列表见 [`archive/`](archive/) 中的快照文档 (DS-8K / Qwen-V3.5 / GLM-V5.1 等).
 
 ---
 
@@ -359,6 +377,12 @@ DS-8K 是当前的具体应用对象，不是平台的设计目标。
 | 2026-05-12 | Step 3 算法决策矩阵成型 | ✅ | 新建 `step3_algorithm_decision_matrix.md`：5 维评估（业务类型 / cache 压力 / 模型参数 / 请求量 / 命中率）× 4 算法（A 路由 / B 淘汰 / C 池化 / D prompt 修改），21 用户全部分类。新发现：D 主导用户占 ~30% 流量、C 池化优先级被低估、Qwen-32B-8K ags 隐藏 Top-4 候选 hit 0.80。portraits §2 二维分类简化为指针，决策入口移到本文档 |
 | 2026-05-12 | Step 3 推荐自动化（HTML §6） | ✅ | `per_user_report_analyzer.py` 加 `compute_step3_recommendation`，每 user 自动输出主菜 + 辅菜 + 业务类型（启发式）+ 难度 + 提升估计 + 实施步骤。`user_report.json` 顶层加 `step3_recommendation`；`user_summary.csv` 加 3 列 (`rec_primary` / `rec_companion` / `rec_difficulty`)；HTML §6 渲染推荐板块（A/B/C/D 四色区分）。3 user profile smoke test 全部通过 |
 | 2026-05-12 | Step 3 决策规则修订（A 路由优先级提升） | ✅ | 用户反馈"复用倒置 + 多租户必走 A 路由"——之前 A 只看高 QPS 触发，漏掉了 cache 隔离这一核心场景。新增 `compute_model_context`：跨用户聚合 hit_rate 检测复用倒置；A 优先级提到决策树顶（早于 D），实现"多租户 + 倒置 → A 主菜（含低 hit user 走 A+D，路由隔离保护其他用户）"。decision_matrix §3 同步修订规则表。3 场景 smoke test 通过：复用倒置 → A+B/A+D；单租户 chain → B；多租户均衡 → B+A |
+| 2026-05-15 | Step 1.6 启动 + GLM-5 调研 | ✅ | `docs/step1_6_token_level_experiment_plan.md` 立项: byte_v1 hit_rate 系统性偏高 0-30pp, 引入 token-level encoder. P1 调研 GLM-5 tokenizer (vocab 154820, wrap_user 5 token overhead). |
+| 2026-05-15 | Step 1.6 实现 (`HFTokenEncoder` + tokenizer vendor) | ✅ | `lib/prompt_encoder.HFTokenEncoder` (通用) + `GLM5TokenEncoder` (alias); GLM-5 / Qwen3 tokenizer vendor 到 `models/<name>_tokenizer/`; CLI `--encoder hf_token --tokenizer-path ... --chat-mode wrap_user`; 19 单元测试通过. |
+| 2026-05-15 | txt_tree_to_csv + flat 布局支持 | ✅ | 同事数据集 (txt 散文件) 转 4 列 CSV; flat/nested 双布局自动检测; 默认 sequential rid (中文文件名不污染); 输出 max/avg prompt 长度统计. |
+| 2026-05-18 | Step 1.6 HTML 反馈整合 | ✅ | (1) "字节级上界"文案条件化 (token 模式改 "vllm 一致"); (2) cache 压力 block/s → block/min bucket (空 minute 比空 second 少, quantile 不再被 padding 拉平), 配合 reuse P80 ≈ 60s; (3) 引入 GB/min: vendor `models/<name>_tokenizer/kv_meta.json` (GLM-5 MLA 89,856 B/tok, Qwen3 GQA 147,456 B/tok), HTML §5 quantile 表追加 GB/min 行 + §1 panel 加 GB/min p80 + §3 user 卡片自动算当天 unique GB total. |
+| 2026-05-18 | Step 1.7 funnel 工具补齐 (Gap 1-4) | ✅ | `target_users_hit_rate.py`: auto-top-k 模式 (默认 4) + GB/min 列 + per-user duration; `txt_tree_to_csv.py`: --request-id-mode sequential 默认; `per_user_report_analyzer.py`: max_prompt_chars/bytes/avg → user_report.stats; `render_user_report_html.py` §3 加 max prompt length 卡片. 完整使用指南落 `USAGE.md` (3 阶段 + 3 案例). |
+| 2026-05-18 | 文档整理 | ✅ | 删除 8 篇仿真器旧路线 doc (PHASE1-4, round2, two_queue_ttl_plan, kv_cache_eviction_design, DEVELOPMENT_REQUIREMENTS); 归档 9 篇已实施 spec / 时间快照到 `docs/archive/`; README 重写指向 USAGE; metrics_glossary 重写以 token 为主. |
 
 ---
 
