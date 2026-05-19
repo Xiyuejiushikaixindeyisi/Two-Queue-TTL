@@ -306,7 +306,7 @@ def print_stats(rows: List[dict], prefix_blocks: int) -> None:
     common_prefix_block0 = hashlib.sha256(b"sys_prompt:block_0000").hexdigest()[:16]
     with_prefix = sum(1 for r in rows if r["hash_ids"].startswith(common_prefix_block0))
 
-    print(f"\n── Synthetic Trace Statistics ─────────────────────────────────────")
+    print("\n── Synthetic Trace Statistics ─────────────────────────────────────")
     print(f"  requests              : {n:,}")
     print(f"  time span             : {time_span:.1f} s")
     print(f"  unique users          : {unique_users:,}")
@@ -315,12 +315,12 @@ def print_stats(rows: List[dict], prefix_blocks: int) -> None:
     print(f"  max blocks / request  : {max(block_counts):,}")
     print(f"  reuse potential       : {sum(block_counts)/unique_blocks:.2f}x")
     print(f"  requests with prefix  : {with_prefix:,} ({with_prefix/n*100:.1f}%)")
-    print(f"  ─── Capacity hints (for --capacities) ────────────────────────────")
+    print("  ─── Capacity hints (for --capacities) ────────────────────────────")
     print(f"  prefix-only capacity  : {prefix_blocks} blocks (protects all sys_prompt)")
     print(f"  10% working set       : ~{unique_blocks//10:,} blocks")
     print(f"  25% working set       : ~{unique_blocks//4:,} blocks")
     print(f"  50% working set       : ~{unique_blocks//2:,} blocks")
-    print(f"──────────────────────────────────────────────────────────────────\n")
+    print("──────────────────────────────────────────────────────────────────\n")
 
 
 # ---------------------------------------------------------------------------

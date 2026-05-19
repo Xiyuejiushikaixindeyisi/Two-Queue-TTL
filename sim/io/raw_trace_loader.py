@@ -25,11 +25,10 @@ For large files the tokenization step dominates.  Progress is printed every
 from __future__ import annotations
 
 import csv
-from typing import List, Optional
+from typing import List
 
-from ..core.prefix_key import make_prefix_path_keys
 from ..core.trace import TraceRecord
-from .prompt_tokenizer import compute_hash_ids, token_count, tokenizer_backend
+from .prompt_tokenizer import compute_hash_ids, tokenizer_backend
 
 
 def load_raw_trace(

@@ -176,8 +176,8 @@ def main() -> None:
                       f"blocks={d['blocks']:>12,}  reqs={d['reqs']:>7,}")
 
     print(f"\n注: 字节级 ideal_hit_rate, block_size={args.block_size} bytes")
-    print(f"    相对 vllm 实际命中率偏高 0-30pp (短 prompt 业务更严重).")
-    print(f"    详见 docs/metrics_glossary.md §3.")
+    print("    相对 vllm 实际命中率偏高 0-30pp (短 prompt 业务更严重).")
+    print("    详见 docs/metrics_glossary.md §3.")
 
 
 if __name__ == "__main__":

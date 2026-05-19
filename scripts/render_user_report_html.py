@@ -727,14 +727,6 @@ def render_user_model_compare(report: dict, model_report: dict | None) -> str:
     u_share = s.get("share_of_model_unique") or 0.0
 
     m_hit = model_report.get("ideal_hit_rate_aggregate", 0.0) or 0.0
-    # model-level avg blocks/req: from model_report (if not stored, derive)
-    m_total_blocks = (
-        sum((u.get("stats") or {}).get("total_blocks", 0)
-            for u in [report]) if False else None
-    )
-    # Approx: model avg ≈ aggregate via stats; here use top-K average as proxy
-    # (we don't carry per-model avg_blocks_per_request — leave 0 if unknown)
-    m_avg_blocks = 0.0  # not directly in model_report; render only user vs model hit + share
 
     # Build 3 bars
     bar_hit = svg_horizontal_bar_compare(
@@ -945,9 +937,9 @@ def render_recommendation(rec: dict | None) -> str:
   </div>
 
   <div class="note" style="margin-top: 10px">
-    决策规则: <a href="../../../docs/step3_algorithm_decision_matrix.md">step3_algorithm_decision_matrix.md</a> §9.2;
+    决策规则: <a href="../../../docs/archive/step3_algorithm_decision_matrix.md">step3_algorithm_decision_matrix.md</a> §9.2 (archived);
     业务类型识别是启发式, 边界 case 请人工 inspect §5 chain decoded content;
-    提升估计基于 Step 1 信号, Step 2 实测前不是承诺.
+    提升估计基于 Step 1 信号, 真机实测前不是承诺.
   </div>
 </div>
 """
@@ -1382,7 +1374,6 @@ def render_lcp_v3(report: dict, forest: dict) -> str:
     dom_len = chains[0]["chain_length"] if chains else 0
 
     # Top 10 集中度
-    top_values = [e["lcp_value"] for e in top10]
     top0_count = sum(e["request_count"] for e in top10 if e["lcp_value"] == 0)
     top_total = sum(e["request_count"] for e in top10)
     pct_at_zero = top0_count / top_total * 100 if top_total else 0

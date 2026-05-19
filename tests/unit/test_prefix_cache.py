@@ -1,5 +1,4 @@
 """Unit tests for PrefixCache simulation engine."""
-import pytest
 
 from sim.cache.prefix_cache import PrefixCache
 from sim.core.prefix_key import make_prefix_path_keys
@@ -72,7 +71,7 @@ class TestEvictionDuringRequest:
         cache.process_request(make_record(1.0, ["h1", "h2"]))
         # Now request with 2 new blocks: h1 and h2 should be evicted but
         # h3 and h4 should not evict each other mid-allocation
-        r = cache.process_request(make_record(2.0, ["h3", "h4"]))
+        cache.process_request(make_record(2.0, ["h3", "h4"]))
         h3_key, h4_key = [k.hex() for k in make_prefix_path_keys("test-model", ["h3", "h4"])]
         assert cache.policy.contains(h3_key)
         assert cache.policy.contains(h4_key)

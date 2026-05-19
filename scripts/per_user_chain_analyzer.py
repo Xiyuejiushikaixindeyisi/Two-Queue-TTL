@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from verify_chain_path_closure import (  # noqa: E402
     TrieNode,
     _canon_fieldnames,
-    compute_prefix_path_keys,
     discover_csv_files,
     find_lcp,
     find_sample_request_at_depth,
@@ -666,7 +665,7 @@ def main() -> None:
     print(f"  Users with unique (non-global)  : {n_unique_chain}", flush=True)
 
     # Per-user table (top 30)
-    print(f"\n  Per-user chain summary (sorted by request count):", flush=True)
+    print("\n  Per-user chain summary (sorted by request count):", flush=True)
     print(
         f"    {'user_id':<32} {'reqs':>8} {'chain':>6} {'cov%':>6} {'vs_global':>12}",
         flush=True,

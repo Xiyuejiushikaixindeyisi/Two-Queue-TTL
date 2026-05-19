@@ -106,11 +106,11 @@ def analyze_one(csv_path: Path, sample: int) -> None:
     print(f"\n[Stats] total rows = {total_seen:,}")
     print(f"[Stats] JSON-messages-like = {json_count} ({json_count*100/max(total_seen,1):.1f}%)")
     if marker_counter:
-        print(f"[Stats] Chat marker hits:")
+        print("[Stats] Chat marker hits:")
         for family, cnt in sorted(marker_counter.items(), key=lambda x: -x[1]):
             print(f"  {family:<20} {cnt:>8} ({cnt*100/max(total_seen,1):.1f}%)")
     else:
-        print(f"[Stats] No chat markers detected — likely raw user text.")
+        print("[Stats] No chat markers detected — likely raw user text.")
 
     # 样本
     print(f"\n[Samples] (first {len(samples)} non-empty)")
@@ -126,9 +126,9 @@ def analyze_one(csv_path: Path, sample: int) -> None:
         print(f"--- end row {idx} ---")
 
     # 判定建议
-    print(f"\n[Suggested chat_mode]")
+    print("\n[Suggested chat_mode]")
     if json_count > total_seen * 0.5:
-        print(f"  → messages  (>50% rows look like JSON messages list)")
+        print("  → messages  (>50% rows look like JSON messages list)")
     elif marker_counter:
         most = max(marker_counter.items(), key=lambda x: x[1])
         if most[1] > total_seen * 0.5:
@@ -136,7 +136,7 @@ def analyze_one(csv_path: Path, sample: int) -> None:
         else:
             print(f"  → mixed     ({most[0]} hits {most[1]} rows < 50% — may need per-user logic)")
     else:
-        print(f"  → wrap_user (no chat markers, plain user text)")
+        print("  → wrap_user (no chat markers, plain user text)")
 
 
 def main() -> None:

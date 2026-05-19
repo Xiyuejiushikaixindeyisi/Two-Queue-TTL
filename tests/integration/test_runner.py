@@ -2,7 +2,7 @@
 import os
 import pytest
 
-from sim.config import SimConfig, TwoQueueTTLConfig
+from sim.config import SimConfig
 from sim.io.registry import OfflineRegistry
 from sim.io.trace_loader import load_trace
 from sim.metrics.reporter import compare_table

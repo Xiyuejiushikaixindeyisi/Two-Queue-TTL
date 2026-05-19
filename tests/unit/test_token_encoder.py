@@ -33,8 +33,8 @@ if not _TOKENIZER_DIR.exists():
 
 transformers = pytest.importorskip("transformers")
 
-from lib.hf_tokenizer import apply_template, load_tokenizer
-from lib.prompt_encoder import GLM5TokenEncoder, HFTokenEncoder
+from lib.hf_tokenizer import apply_template, load_tokenizer  # noqa: E402  (after importorskip)
+from lib.prompt_encoder import GLM5TokenEncoder, HFTokenEncoder  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

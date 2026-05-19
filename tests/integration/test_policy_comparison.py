@@ -24,7 +24,6 @@ TTL-expiry-does-not-cause-miss (D5 in round2_plan.md)
 """
 from __future__ import annotations
 
-import pytest
 
 from sim.cache.prefix_cache import PrefixCache
 from sim.config import SimConfig, TwoQueueTTLConfig

@@ -95,7 +95,6 @@ class TestPromotion:
 
 class TestEvictionPriority:
     def test_evicts_probation_before_protected(self):
-        p = make_policy(capacity=4, protected_ratio=0.5, base_ttl=100.0)
         # Add one protected block (via registry)
         reg = OfflineRegistry(protected={"p1"})
         p2 = make_policy(capacity=4, protected_ratio=0.5, base_ttl=100.0, registry=reg)

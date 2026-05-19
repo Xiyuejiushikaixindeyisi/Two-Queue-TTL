@@ -1,11 +1,9 @@
 """Unit tests for MetricsCollector and MetricsSnapshot."""
 import pytest
 
-from sim.cache.prefix_cache import PrefixCache
 from sim.config import SimConfig
 from sim.core.trace import TraceRecord
-from sim.metrics.collector import MetricsCollector, MetricsSnapshot
-from sim.policies.lru import LRUPolicy
+from sim.metrics.collector import MetricsSnapshot
 from sim.runner import SimulationRunner
 
 

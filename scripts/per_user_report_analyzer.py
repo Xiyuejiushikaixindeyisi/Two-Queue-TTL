@@ -50,7 +50,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from verify_chain_path_closure import (  # noqa: E402
     TrieNode,
-    compute_prefix_path_keys,
     discover_csv_files,
     iter_raw_records,
     split_blocks,
@@ -373,7 +372,7 @@ def _infer_business_type(chains: list[dict]) -> tuple[str, str]:
     """Heuristic business-type inference from decoded chain content.
 
     Returns (type_id, evidence_snippet). Type_id matches the categories used
-    in docs/step3_algorithm_decision_matrix.md §1.
+    in docs/archive/step3_algorithm_decision_matrix.md §1 (archived).
 
     Heuristics are intentionally conservative — when ambiguous, returns
     "unknown" so a human can disambiguate via HTML §5 chain forest.
@@ -387,7 +386,6 @@ def _infer_business_type(chains: list[dict]) -> tuple[str, str]:
         (b.get("decoded_text") or "") for b in head.get("decoded_content", [])
     )[:1000]
     n_chains = len(chains)
-    top_cov = head.get("coverage_pct", 0.0)
     top_len = head.get("chain_length", 0)
 
     text_lower = text.lower()
@@ -439,7 +437,7 @@ def _estimate_uplift(
     if primary == "C":
         # Capacity / pooling — proportional to capacity until WS plateau
         return {"kind": "hit_rate", "value": "ceiling approaches ideal_hit_rate; "
-                f"needs cache ≥ unique_blocks to fully realize",
+                "needs cache ≥ unique_blocks to fully realize",
                 "confidence": "medium"}
     # B — chain pin
     # Upper bound: if user currently misses chain portion, pin recovers
@@ -564,7 +562,7 @@ def compute_model_context(
     latest_list = [(r.get("stats") or {}).get("latest_timestamp")
                    for r in user_reports.values()]
     earliest_list = [e for e in earliest_list if e]
-    latest_list = [l for l in latest_list if l]
+    latest_list = [ts for ts in latest_list if ts]
     if earliest_list and latest_list:
         duration_sec = max(latest_list) - min(earliest_list)
     else:
@@ -806,7 +804,7 @@ def compute_step3_recommendation(
     Output dict combines legacy primary/companion (A/B/C/D for CSV) with
     v2 subtype fields (a_subtype / b_subtype / c_subtype).
 
-    See docs/step3_algorithm_decision_matrix.md §9.2 for the underlying rules.
+    See docs/archive/step3_algorithm_decision_matrix.md §9.2 for the underlying rules (archived).
     """
     hit_rate = report_stats.get("ideal_hit_rate", 0.0)
     unique = report_stats.get("unique_blocks", 0)
@@ -945,8 +943,8 @@ def compute_step3_recommendation(
         "recommended_queue_count": sum(
             1 for c in chains if (c.get("coverage_pct") or 0) >= 10.0
         ),
-        "_note": "see docs/step3_algorithm_decision_matrix.md §9.2 for v2 rules; "
-                 "see docs/user_report_html_redesign.md §9 for queue count rule",
+        "_note": "see docs/archive/step3_algorithm_decision_matrix.md §9.2 for v2 rules (archived); "
+                 "see docs/archive/user_report_html_redesign.md §9 for queue count rule",
     }
 
 

@@ -1,5 +1,4 @@
 """Unit tests for LRUPolicy."""
-import pytest
 
 from sim.policies.lru import LRUPolicy
 

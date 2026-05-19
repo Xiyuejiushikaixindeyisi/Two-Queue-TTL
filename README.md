@@ -15,10 +15,8 @@
 | 数据集摆放约定 | [`data/README.md`](data/README.md) |
 | token-level 编码设计原理 | [`docs/step1_6_token_level_experiment_plan.md`](docs/step1_6_token_level_experiment_plan.md) |
 | 指标释义 (token 模式) | [`docs/metrics_glossary.md`](docs/metrics_glossary.md) |
-| 算法决策矩阵 (5 维 × 4 算法) | [`docs/step3_algorithm_decision_matrix.md`](docs/step3_algorithm_decision_matrix.md) |
 | 术语规范 (block / key / chain) | [`docs/terminology.md`](docs/terminology.md) |
-| 三步走验证路线图 (Step 1 → 2 → 3) | [`docs/3step_validation_plan.md`](docs/3step_validation_plan.md) |
-| 历史 spec / 时间快照 | [`docs/archive/`](docs/archive/) |
+| 历史 spec / 路线图 / 算法决策矩阵 (已归档) | [`docs/archive/`](docs/archive/) |
 
 ## 工具速查
 

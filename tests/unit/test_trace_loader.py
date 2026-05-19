@@ -1,7 +1,4 @@
 """Unit tests for trace_loader."""
-import os
-import tempfile
-import json
 import pytest
 
 from sim.io.trace_loader import load_trace

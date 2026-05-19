@@ -37,7 +37,7 @@ from sim.config import SimConfig, TTLLRUConfig, TwoQueueTTLConfig
 from sim.core.future_index import build_future_index
 from sim.io.raw_trace_loader import load_raw_trace
 from sim.io.trace_loader import load_trace, precompute_prefix_keys
-from sim.metrics.collector import MetricsSnapshot, compute_gap_closed_ratios
+from sim.metrics.collector import compute_gap_closed_ratios
 from sim.runner import SimulationRunner
 
 
@@ -138,7 +138,6 @@ def run_sweep(
             runner = SimulationRunner(cfg)
             snap = runner.run(trace, future_index=future_index)
             elapsed = time.time() - t_run
-            gcr_str = ""
             print(f"  hit_rate={snap.prefix_block_hit_rate:.4f}  ({elapsed:.1f}s)", flush=True)
             cap_snapshots.append(snap)
 
@@ -186,7 +185,7 @@ def print_summary_table(results: list[dict]) -> None:
 
     col_w = 14 + col * len(policies)
     print("\n" + "=" * col_w)
-    print(f"  prefix_block_hit_rate  (higher is better)")
+    print("  prefix_block_hit_rate  (higher is better)")
     print(f"{'capacity':>12}" + "".join(f"{p:>{col}}" for p in policies))
     print("-" * col_w)
     for cap in cap_set:
@@ -199,7 +198,7 @@ def print_summary_table(results: list[dict]) -> None:
     # gap_closed_ratio (only if infinite_cache is present)
     if "infinite_cache" in policies_in_results and "lru" in policies_in_results:
         print("=" * col_w)
-        print(f"  gap_closed_ratio = (hit_rate - lru) / (infinite - lru)  (higher is better)")
+        print("  gap_closed_ratio = (hit_rate - lru) / (infinite - lru)  (higher is better)")
         print(f"{'capacity':>12}" + "".join(f"{p:>{col}}" for p in policies))
         print("-" * col_w)
         for cap in cap_set:
@@ -213,7 +212,7 @@ def print_summary_table(results: list[dict]) -> None:
         print("=" * col_w + "\n")
 
     print("=" * col_w)
-    print(f"  hot_prefix_eviction_count  (lower is better)")
+    print("  hot_prefix_eviction_count  (lower is better)")
     print(f"{'capacity':>12}" + "".join(f"{p:>{col}}" for p in policies))
     print("-" * col_w)
     for cap in cap_set:
@@ -224,7 +223,7 @@ def print_summary_table(results: list[dict]) -> None:
     print("=" * col_w + "\n")
 
     print("=" * col_w)
-    print(f"  protected_pollution_rate  (lower is better, TwoQueueTTL only)")
+    print("  protected_pollution_rate  (lower is better, TwoQueueTTL only)")
     print(f"{'capacity':>12}" + "".join(f"{p:>{col}}" for p in policies))
     print("-" * col_w)
     for cap in cap_set:
@@ -243,7 +242,6 @@ def generate_plots(results: list[dict], output_dir: str, trace_path: str) -> Non
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     policies = ["lru", "ttl_lru", "two_queue_ttl"]
     colors = {"lru": "#4878cf", "ttl_lru": "#6acc65", "two_queue_ttl": "#d65f5f"}
@@ -342,7 +340,6 @@ def generate_plots(results: list[dict], output_dir: str, trace_path: str) -> Non
 # ---------------------------------------------------------------------------
 
 def print_trace_stats(trace) -> None:
-    from collections import Counter
     n = len(trace)
     block_counts = [len(r.hash_ids) for r in trace]
     unique_users = len({r.user_id for r in trace})

@@ -8,7 +8,7 @@ report covering:
   * Pairwise top-N Jaccard between samples (global chain block-set)
   * Per-user chain Jaccard across samples that share a user
   * Stability tier per the thresholds defined in
-    docs/3step_validation_plan.md §2.2/1.3
+    docs/archive/3step_validation_plan.md §2.2/1.3
 
 Reusable across models — input is a list of LABEL=PATH pairs naming Step 1.2
 JSON outputs, and there is no dependency on any specific tokenizer or model.
@@ -16,7 +16,7 @@ Offline-safe.
 
 Skeleton status (2026-05-07): structure + core computations are in place.
 Threshold-tier wording matches the plan; awaiting the three dsk8k_* samples
-to validate end-to-end. See `docs/3step_validation_plan.md` §2.2/1.3.
+to validate end-to-end. See `docs/archive/3step_validation_plan.md` §2.2/1.3.
 
 Usage
 -----
@@ -381,7 +381,7 @@ def main() -> None:
                 "unstable":     "< 0.40    (chain-based optimization not viable)",
             },
             "note": (
-                "Tier thresholds come from docs/3step_validation_plan.md §2.2/1.3 "
+                "Tier thresholds come from docs/archive/3step_validation_plan.md §2.2/1.3 "
                 "(originally specified for 7-day Jaccard). The same bands are applied "
                 "to whatever windows the caller passed in; interpretation should "
                 "consider the actual time spans of the input samples."

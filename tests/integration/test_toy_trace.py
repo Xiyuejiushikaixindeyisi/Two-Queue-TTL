@@ -238,7 +238,7 @@ class TestExperimentRunner:
                 ],
             })
             runner = ExperimentRunner(exp_cfg)
-            snapshots = runner.run()
+            runner.run()
 
             summary_path = os.path.join(tmpdir, "summary.json")
             assert os.path.exists(summary_path)

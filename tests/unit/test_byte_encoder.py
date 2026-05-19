@@ -15,7 +15,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
-from lib.prompt_encoder import ByteLevelEncoder
+from lib.prompt_encoder import ByteLevelEncoder  # noqa: E402  (sys.path setup above)
 
 
 # ---------------------------------------------------------------------------

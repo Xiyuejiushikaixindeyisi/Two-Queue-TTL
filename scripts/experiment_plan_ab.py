@@ -110,7 +110,7 @@ def compute_adaptive_ttls(
     insertion_rate = unique_blocks / time_span if time_span > 0 else 1.0
 
     result = {}
-    print(f"\n── Adaptive TTL computation ─────────────────────────────────────")
+    print("\n── Adaptive TTL computation ─────────────────────────────────────")
     print(f"  unique block keys : {unique_blocks:,}")
     print(f"  trace time span   : {time_span:.1f} s")
     print(f"  insertion_rate    : {insertion_rate:.1f} blocks/s  (unique keys / time_span)")
@@ -124,7 +124,7 @@ def compute_adaptive_ttls(
         result[cap] = round(adaptive_ttl, 1)
         flag = " (= floor)" if adaptive_ttl == base_ttl else ""
         print(f"  {cap:>10,}  {cache_lifetime:>14.1f} s  {adaptive_ttl:>12.1f} s{flag}")
-    print(f"─────────────────────────────────────────────────────────────────\n")
+    print("─────────────────────────────────────────────────────────────────\n")
     return result
 
 
@@ -539,7 +539,7 @@ def _pick_best_threshold(part3_results: list[dict], probe_capacities: list[int],
                     scores[t].append(gap)
     avg_scores = {t: (sum(v) / len(v) if v else float("-inf")) for t, v in scores.items()}
     best = max(avg_scores, key=avg_scores.__getitem__)
-    print(f"\n  Threshold selection (avg gap_closed_ratio across probe capacities):")
+    print("\n  Threshold selection (avg gap_closed_ratio across probe capacities):")
     for t in sorted(thresholds):
         marker = " ← SELECTED" if t == best else ""
         print(f"    threshold={t}  avg_gap={avg_scores[t]:.4f}{marker}")

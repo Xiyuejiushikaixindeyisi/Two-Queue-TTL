@@ -6,7 +6,7 @@ production model, then collects all selected-user recommendations into a
 single CSV + Markdown table for cross-model comparison.
 
 Use this to verify v2 工具 produces results consistent with
-docs/step3_algorithm_decision_matrix.md §9.2.5 reference table.
+docs/archive/step3_algorithm_decision_matrix.md §9.2.5 reference table.
 
 Usage
 -----
@@ -32,7 +32,7 @@ Outputs
                                   + cross-model subtype distribution
 
 After running, compare against §9.2.5 reference table in
-docs/step3_algorithm_decision_matrix.md and fill §9.2.8 偏差日志
+docs/archive/step3_algorithm_decision_matrix.md and fill §9.2.8 偏差日志
 with any user whose subtype differs from expectation.
 """
 from __future__ import annotations
@@ -177,7 +177,7 @@ def write_markdown(
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("# v2 工具实测汇总\n\n")
-        f.write("> 对照 `docs/step3_algorithm_decision_matrix.md` §9.2.5 检查归类一致性。\n\n")
+        f.write("> 对照 `docs/archive/step3_algorithm_decision_matrix.md` §9.2.5 检查归类一致性。\n\n")
 
         # === Per-model tables ===
         for model in models_ordered:

@@ -407,14 +407,14 @@ def main() -> None:
             print("\n  [Step 2] Generate registry", flush=True)
             step_registry(m)
         else:
-            print(f"\n  [Step 2] Skipped", flush=True)
+            print("\n  [Step 2] Skipped", flush=True)
 
         # Step 3: Analysis
         if not args.skip_analysis:
             print("\n  [Step 3] Trace analysis", flush=True)
             step_analysis(m)
         else:
-            print(f"\n  [Step 3] Skipped", flush=True)
+            print("\n  [Step 3] Skipped", flush=True)
 
     # Step 4: Comparison
     print_comparison(targets)

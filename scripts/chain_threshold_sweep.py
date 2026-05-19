@@ -222,7 +222,7 @@ def main() -> None:
           f"({thresholds[0]} → {thresholds[-1]} step {args.threshold_step})",
           flush=True)
     # Show global length at a few key thresholds
-    print(f"\n  Global chain length at key thresholds:", flush=True)
+    print("\n  Global chain length at key thresholds:", flush=True)
     for t in [0.0, 0.30, 0.45, 0.50, 0.80, 0.95, 1.0]:
         if t in thresholds:
             idx = thresholds.index(t)

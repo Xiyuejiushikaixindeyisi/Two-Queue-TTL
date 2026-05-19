@@ -56,7 +56,7 @@ def analyze_user_distribution(trace, heavy_pct: float) -> dict:
     heavy_reqs = sum(users_sorted[:heavy_n])
     light_reqs = total_reqs - heavy_reqs
 
-    print(f"\n── User Distribution ────────────────────────────────────────────")
+    print("\n── User Distribution ────────────────────────────────────────────")
     print(f"  total users            : {total_users:,}")
     print(f"  total requests         : {total_reqs:,}")
     print(f"  avg requests/user      : {total_reqs/total_users:.1f}")
@@ -69,11 +69,11 @@ def analyze_user_distribution(trace, heavy_pct: float) -> dict:
     print(f"    → {light_reqs:,} requests  ({100*light_reqs/total_reqs:.1f}% of total)")
 
     # Percentile breakdown
-    print(f"\n  Request count percentiles (per user):")
+    print("\n  Request count percentiles (per user):")
     for pct in [50, 80, 90, 95, 99]:
         idx = min(int(total_users * (1 - pct/100)), total_users - 1)
         print(f"    p{pct:>2}  : {users_sorted[idx]:>6,} requests/user")
-    print(f"─────────────────────────────────────────────────────────────────")
+    print("─────────────────────────────────────────────────────────────────")
 
     heavy_user_ids = {uid for uid, cnt in req_per_user.most_common(heavy_n)}
     return {
@@ -108,12 +108,12 @@ def analyze_block_distribution(trace, heavy_user_ids: set) -> dict:
     shared = heavy_blocks & light_blocks
     total_unique = len(heavy_blocks | light_blocks)
 
-    print(f"\n── Block Distribution by User Tier ──────────────────────────────")
-    print(f"  Heavy users:")
+    print("\n── Block Distribution by User Tier ──────────────────────────────")
+    print("  Heavy users:")
     print(f"    unique blocks        : {len(heavy_blocks):,}")
     print(f"    total block refs     : {heavy_total:,}")
     print(f"    avg reuse (heavy)    : {heavy_total/max(len(heavy_blocks),1):.2f}x")
-    print(f"  Light users:")
+    print("  Light users:")
     print(f"    unique blocks        : {len(light_blocks):,}")
     print(f"    total block refs     : {light_total:,}")
     print(f"    avg reuse (light)    : {light_total/max(len(light_blocks),1):.2f}x")
@@ -123,11 +123,11 @@ def analyze_block_distribution(trace, heavy_user_ids: set) -> dict:
 
     # Capacity estimate: minimum cache to hold all heavy-user working set
     heavy_ws = len(heavy_blocks)
-    print(f"\n  Working set estimates:")
+    print("\n  Working set estimates:")
     print(f"    Heavy users working set  : {heavy_ws:,} blocks  "
           f"({heavy_ws*128//1000:,}K tokens)")
     print(f"    Full working set         : {total_unique:,} blocks")
-    print(f"─────────────────────────────────────────────────────────────────")
+    print("─────────────────────────────────────────────────────────────────")
 
     return {
         "heavy_unique_blocks": len(heavy_blocks),
@@ -173,20 +173,20 @@ def analyze_reuse_times(trace, future_index: dict) -> dict:
     def pct(p):
         return intervals[min(int(n * p / 100), n - 1)]
 
-    print(f"\n── Reuse Time Distribution ──────────────────────────────────────")
+    print("\n── Reuse Time Distribution ──────────────────────────────────────")
     print(f"  reuse events           : {n:,}")
-    print(f"  Percentile    reuse_time_seconds  reuse_time_minutes")
+    print("  Percentile    reuse_time_seconds  reuse_time_minutes")
     print(f"  {'─'*52}")
     for p in [10, 25, 50, 75, 80, 90, 95, 99]:
         v = pct(p)
         print(f"  p{p:<3}           {v:>18.1f}  {v/60:>18.1f}")
-    print(f"─────────────────────────────────────────────────────────────────")
-    print(f"\n  TTL recommendations (based on reuse time):")
+    print("─────────────────────────────────────────────────────────────────")
+    print("\n  TTL recommendations (based on reuse time):")
     p80 = pct(80)
     p95 = pct(95)
     print(f"    base_ttl     = {p80:.0f}s  (p80 — protects 80% of reuse events)")
     print(f"    extended_ttl = {p95:.0f}s  (p95 — for high-frequency blocks)")
-    print(f"─────────────────────────────────────────────────────────────────")
+    print("─────────────────────────────────────────────────────────────────")
 
     return {
         "reuse_event_count": n,
@@ -231,16 +231,17 @@ def analyze_session_structure(trace, heavy_user_ids: set) -> dict:
             v = pct(p)
             print(f"    p{p}  : {v:>8.1f}s  ({v/60:.1f} min)")
 
-    print(f"\n── Session Structure (inter-turn gaps) ──────────────────────────")
+    print("\n── Session Structure (inter-turn gaps) ──────────────────────────")
     summarize(heavy_gaps, "Heavy users")
     summarize(light_gaps, "Light users")
-    print(f"─────────────────────────────────────────────────────────────────")
+    print("─────────────────────────────────────────────────────────────────")
 
     heavy_gaps.sort() if heavy_gaps else None
     light_gaps.sort()  if light_gaps else None
 
     def safe_pct(gaps, p):
-        if not gaps: return None
+        if not gaps:
+            return None
         n = len(gaps)
         return gaps[min(int(n*p/100), n-1)]
 
@@ -263,7 +264,7 @@ def recommend_capacities(block_stats: dict, reuse_stats: dict, trace) -> list[in
     time_span    = trace[-1].timestamp - trace[0].timestamp
     insertion_rate = total_unique / time_span if time_span > 0 else 1
 
-    print(f"\n── Capacity Sweep Recommendations ───────────────────────────────")
+    print("\n── Capacity Sweep Recommendations ───────────────────────────────")
     print(f"  heavy user working set   : {heavy_ws:,} blocks")
     print(f"  full working set         : {total_unique:,} blocks")
     print(f"  insertion rate           : {insertion_rate:.1f} blocks/s")
@@ -279,17 +280,18 @@ def recommend_capacities(block_stats: dict, reuse_stats: dict, trace) -> list[in
     ]
     # Round to nice numbers and deduplicate
     def round_cap(c):
-        if c < 1000: return max(100, c)
+        if c < 1000:
+            return max(100, c)
         magnitude = 10 ** (len(str(c)) - 2)
         return max(1000, round(c / magnitude) * magnitude)
 
     caps = sorted(set(round_cap(a) for a in anchors if a > 0))
     print(f"\n  Recommended capacities   : {caps}")
-    print(f"  Rationale:")
+    print("  Rationale:")
     for c, pct in zip(caps, ["~5% heavy WS", "~20% heavy WS", "~50% heavy WS",
                                "~100% heavy WS", "~200% heavy WS", "full WS"]):
         print(f"    {c:>8,} blocks  ({pct})")
-    print(f"─────────────────────────────────────────────────────────────────")
+    print("─────────────────────────────────────────────────────────────────")
     return caps
 
 
@@ -302,26 +304,26 @@ def print_experiment_commands(args, reuse_stats: dict, caps: list[int]) -> None:
     ext_ttl  = reuse_stats.get("recommended_extended_ttl", 1612.0)
     caps_str = " ".join(str(c) for c in caps)
 
-    print(f"\n── Suggested Experiment Commands ────────────────────────────────")
-    print(f"\n  # Phase 2: Baseline capacity sweep")
-    print(f"  python scripts/analyze_capacity_sweep.py \\")
+    print("\n── Suggested Experiment Commands ────────────────────────────────")
+    print("\n  # Phase 2: Baseline capacity sweep")
+    print("  python scripts/analyze_capacity_sweep.py \\")
     print(f"      --trace {args.trace} \\")
     print(f"      --capacities {caps_str} \\")
     print(f"      --base-ttl {base_ttl:.0f} \\")
     print(f"      --extended-ttl {ext_ttl:.0f} \\")
-    print(f"      --infinite-cache \\")
+    print("      --infinite-cache \\")
     print(f"      --output-dir {args.output_dir}/phase2_baseline")
 
-    print(f"\n  # Phase 3: Plan A+B1 (adaptive TTL + threshold sweep)")
-    print(f"  python scripts/experiment_plan_ab.py \\")
+    print("\n  # Phase 3: Plan A+B1 (adaptive TTL + threshold sweep)")
+    print("  python scripts/experiment_plan_ab.py \\")
     print(f"      --trace {args.trace} \\")
     print(f"      --capacities {caps_str} \\")
     print(f"      --probe-capacities {' '.join(str(c) for c in caps[1:4])} \\")
-    print(f"      --thresholds 2 3 4 5 \\")
+    print("      --thresholds 2 3 4 5 \\")
     print(f"      --base-ttl {base_ttl:.0f} \\")
-    print(f"      --alpha 0.7 \\")
+    print("      --alpha 0.7 \\")
     print(f"      --output-dir {args.output_dir}/phase3_plan_ab")
-    print(f"─────────────────────────────────────────────────────────────────\n")
+    print("─────────────────────────────────────────────────────────────────\n")
 
 
 # ---------------------------------------------------------------------------

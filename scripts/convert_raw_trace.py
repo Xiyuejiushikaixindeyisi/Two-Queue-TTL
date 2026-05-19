@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Raw prompts from 64K-context models can exceed the default 131072-char limit.
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — comfortably covers 64K tokens
 
-from sim.io.prompt_tokenizer import compute_hash_ids, tokenizer_backend
+from sim.io.prompt_tokenizer import compute_hash_ids, tokenizer_backend  # noqa: E402  (must come after csv.field_size_limit)
 
 
 def parse_args() -> argparse.Namespace:

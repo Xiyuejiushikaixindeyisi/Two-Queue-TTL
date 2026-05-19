@@ -17,7 +17,6 @@ key, mirroring vLLM's hash_block_tokens chain.
 
 import hashlib
 
-import pytest
 
 from sim.core.prefix_key import _NONE_SEED, _chain_step, make_prefix_path_keys
 

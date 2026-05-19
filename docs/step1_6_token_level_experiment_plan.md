@@ -566,10 +566,10 @@ python3 scripts/compare_byte_vs_token.py /data/M1/out_byte /data/M1/out_token
 
 | 文档 | 关系 |
 |---|---|
-| `docs/step1_runbook.md` | 本文档是 step1 的"精确化补丁", 不替代 step1 |
+| `docs/archive/step1_runbook.md` | 本文档是 step1 的"精确化补丁", 不替代 step1 (已归档) |
 | `docs/metrics_glossary.md §3` | 偏差来源已记录, 本实验是验证 + 修正 |
-| `docs/step2_experiment_priorities.md` | step2 实验排期基于字节级数字; 如果 token 级与字节级差距 ≤ 5pp, **排期不变**; 如果差距大, step2 P0-P3 需要重新校准 |
-| `docs/step3_algorithm_decision_matrix.md` | A/B/C 决策矩阵的"用户 hit_rate"阈值用的是字节级. token 级实验后可能需要调整 §9.2 的阈值带 |
+| `docs/archive/step2_experiment_priorities.md` | (已归档, Step 2 API 测试 已出 scope) |
+| `docs/archive/step3_algorithm_decision_matrix.md` | (已归档, Step 3 算法设计 已出 scope) — 历史决策矩阵仍可参考 |
 | `scripts/quick_hit_rate.py` | 不动. 字节级仍是"新数据快速 sanity check"的默认工具 |
 
 ---

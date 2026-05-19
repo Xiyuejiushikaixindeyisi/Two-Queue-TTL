@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .cache.prefix_cache import PrefixCache
-from .config import SimConfig, TTLLRUConfig
+from .config import SimConfig
 from .core.future_index import FutureIndex, build_future_index  # noqa: F401 (FutureIndex used in type hint)
 from .core.trace import TraceRecord
 from .io.registry import OfflineRegistry

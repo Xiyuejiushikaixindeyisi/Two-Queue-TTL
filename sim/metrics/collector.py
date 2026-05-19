@@ -20,11 +20,11 @@ Call compute_gap_closed_ratios(snapshots) after collecting all policy results.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 from ..cache.prefix_cache import RequestResult
-from ..core.block import BlockMeta, BlockQueue
+from ..core.block import BlockQueue
 from ..core.future_index import FutureIndex, build_future_index, has_future_access
 from ..core.trace import TraceRecord
 

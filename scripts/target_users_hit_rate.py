@@ -352,7 +352,7 @@ def main() -> None:
             kvb = encoder_meta.get("kv_bytes_per_token")
             if kvb:
                 f.write(f"- kv_bytes_per_token: `{kvb:,}` (用于 GB/min 估算)\n")
-        f.write(f"- User mode: " + ("auto-top-" + str(args.auto_top_k) + " per dataset"
+        f.write("- User mode: " + ("auto-top-" + str(args.auto_top_k) + " per dataset"
                                    if auto_mode else f"fixed {len(fixed_users)} users") + "\n")
 
         # Long table (universal — works for both modes)

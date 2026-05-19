@@ -1,7 +1,7 @@
 # 指标与图表释义 — token-level HTML 报告读法
 
 > **适用范围**: `outputs/<model>/per_user_reports/<uid>/user_report.html` (Step 1.6+, token-level encoder)
-> **配套文档**: [`USAGE.md`](../USAGE.md) (使用流程), [`step3_algorithm_decision_matrix.md`](step3_algorithm_decision_matrix.md) (算法决策矩阵)
+> **配套文档**: [`USAGE.md`](../USAGE.md) (使用流程)
 >
 > 主线: token-level (block_unit=tokens, 与 vLLM 一致) + 真实 GB/min KV cache 压力估算.
 > byte-level (regression baseline, 字节级 prompt block) 见文末 Appendix.
@@ -99,9 +99,8 @@
 
 - **3 个 badge**: A 子类 / B 子类 / C 子类
 - **A(4) 黄色警告**: 大模型暂缓, 先补 instance_count + cache_capacity_blocks
-- **B(2) 灰色说明**: 淘汰打分公式待 Step 2 实测
+- **B(2) 灰色说明**: 淘汰打分公式待真机实测调参
 - **反常 ⚠️**: 长 chain + 低 cov + 低 hit, 回 §7 看 decoded
-- **实施步骤**: 可直接抄成 Step 2/3 任务卡
 
 ---
 
