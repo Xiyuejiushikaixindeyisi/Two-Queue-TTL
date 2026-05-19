@@ -234,6 +234,8 @@ def run_chat_mode(args, tokenizer) -> None:
     out_records: list[dict] = []
     skipped_no_json = 0
     skipped_no_messages = 0
+    skipped_render_error = 0
+    first_render_error: str = ""
 
     for i, raw_row in enumerate(raw_rows, 1):
         row = _normalize_header_keys(raw_row)
@@ -260,14 +262,22 @@ def run_chat_mode(args, tokenizer) -> None:
             "request_type": args.request_type,
         }
 
-        base_token_count = 0
-        for v in variants:
-            transformed_tools = apply_variant(v, tools, patterns=patterns)
-            token_ids = render_to_tokens(tokenizer, messages, transformed_tools)
-            hash_ids = _sha256_chain(token_ids, args.block_size)
-            record[f"hash_ids_{v}"] = "|".join(hash_ids)
-            if v == "base":
-                base_token_count = len(token_ids)
+        # Render all variants; if any one of them fails, skip the whole row
+        # (we need consistent 4-column output, not a partial row).
+        try:
+            base_token_count = 0
+            for v in variants:
+                transformed_tools = apply_variant(v, tools, patterns=patterns)
+                token_ids = render_to_tokens(tokenizer, messages, transformed_tools)
+                hash_ids = _sha256_chain(token_ids, args.block_size)
+                record[f"hash_ids_{v}"] = "|".join(hash_ids)
+                if v == "base":
+                    base_token_count = len(token_ids)
+        except Exception as e:
+            skipped_render_error += 1
+            if not first_render_error:
+                first_render_error = f"row {i}: {type(e).__name__}: {e}"
+            continue
 
         record["input_length"] = base_token_count
         out_records.append(record)
@@ -277,7 +287,10 @@ def run_chat_mode(args, tokenizer) -> None:
 
     print(f"Converted: {len(out_records):,} rows; "
           f"skipped no-json: {skipped_no_json:,}; "
-          f"skipped no-messages: {skipped_no_messages:,}")
+          f"skipped no-messages: {skipped_no_messages:,}; "
+          f"skipped render-error: {skipped_render_error:,}")
+    if first_render_error:
+        print(f"  first render error: {first_render_error[:300]}")
 
     cols = ["timestamp", "model_id", "user_id", "request_type", "input_length"]
     hash_cols = [f"hash_ids_{v}" for v in variants]

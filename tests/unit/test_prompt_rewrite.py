@@ -339,6 +339,68 @@ class TestMessagesUntouched:
 # Bindings (normalize_tool_lossless) — verify reversibility metadata
 # ---------------------------------------------------------------------------
 
+class TestMessageNormalization:
+    """The chat_render._normalize_messages preprocessor must parse stringified
+    tool_calls[i].function.arguments → dict, so the GLM-5 template's `.items()`
+    iteration doesn't crash. Production wire format ships these as strings."""
+
+    def test_stringified_arguments_parsed_to_dict(self):
+        from lib.prompt_rewrite.chat_render import _normalize_messages
+        messages = [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "Beijing", "unit": "C"}',
+                },
+            }],
+        }]
+        out = _normalize_messages(messages)
+        args = out[0]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(args, dict)
+        assert args == {"city": "Beijing", "unit": "C"}
+
+    def test_already_dict_arguments_left_alone(self):
+        from lib.prompt_rewrite.chat_render import _normalize_messages
+        messages = [{
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "x", "arguments": {"a": 1}}}],
+        }]
+        out = _normalize_messages(messages)
+        assert out[0]["tool_calls"][0]["function"]["arguments"] == {"a": 1}
+
+    def test_messages_without_tool_calls_passthrough(self):
+        from lib.prompt_rewrite.chat_render import _normalize_messages
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        assert _normalize_messages(messages) == messages
+
+    def test_does_not_mutate_input(self):
+        from lib.prompt_rewrite.chat_render import _normalize_messages
+        original = [{
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "x", "arguments": '{"a": 1}'}}],
+        }]
+        original_snapshot = json.dumps(original)
+        _normalize_messages(original)
+        assert json.dumps(original) == original_snapshot
+
+    def test_unparseable_string_arguments_left_as_string(self):
+        from lib.prompt_rewrite.chat_render import _normalize_messages
+        messages = [{
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "x", "arguments": "not-valid-json"}}],
+        }]
+        out = _normalize_messages(messages)
+        # Left as string; caller's try/except will catch the downstream template error.
+        assert out[0]["tool_calls"][0]["function"]["arguments"] == "not-valid-json"
+
+
 class TestBindings:
     def test_path_binding_recorded(self):
         _, bindings = normalize_tool_lossless(PATH_TOOL)
