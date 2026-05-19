@@ -1,10 +1,22 @@
 # 指标与图表释义 — token-level HTML 报告读法
 
 > **适用范围**: `outputs/<model>/per_user_reports/<uid>/user_report.html` (Step 1.6+, token-level encoder)
-> **配套文档**: [`USAGE.md`](../USAGE.md) (使用流程)
+> **配套文档**: [`USAGE.md`](../USAGE.md) (使用流程) · [Stage 3 prompt-rewrite 计划](stage3_prompt_rewrite_plan.md)
 >
 > 主线: token-level (block_unit=tokens, 与 vLLM 一致) + 真实 GB/min KV cache 压力估算.
 > byte-level (regression baseline, 字节级 prompt block) 见文末 Appendix.
+
+## 0a. trace → hash_ids 入口 (2026-05-19 起统一)
+
+| 入口 | 用途 | 输入 | 输出 hash_ids 列 |
+|---|---|---|---|
+| `scripts/convert_trace.py --mode raw` | 标准 raw_prompt 文本 → hash_ids | `raw_prompt` 列 (或 `请求参数` 别名) | 1 列 `hash_ids` |
+| `scripts/convert_trace.py --mode chat` | 含 tools/messages 的 JSON body → 4 变体 hash_ids | `request_input` JSON 列 | 4 列 `hash_ids_{base,reorder,placeholder,both}` |
+| ~~`scripts/convert_raw_trace.py`~~ | **已废弃**, 改 shim 调 `convert_trace.py --mode raw` | — | — |
+
+两种 mode 都走 `lib/prompt_encoder.HFTokenEncoder` codepath (GLM-V5 tokenizer + `apply_chat_template` + SHA256 chain), 与 vllm-ascend 对齐。详见 [stage3_prompt_rewrite_plan.md §3](stage3_prompt_rewrite_plan.md) 与决策记录 D10。
+
+`data/` 下 2026-05-19 之前用旧 `convert_raw_trace.py` 转过的 trace 视为 "legacy hash, 未对齐 vllm", 不强制重转, 但新分析任务推荐用新入口。
 
 ## 0. 一句话使用顺序
 
