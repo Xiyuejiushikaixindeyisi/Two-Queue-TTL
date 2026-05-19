@@ -92,10 +92,21 @@ _RAW_COL_ALIASES = {
 
 _CHAT_USER_ALIASES = ("user_id", "租户ID")
 _CHAT_TS_ALIASES = ("timestamp", "create_time", "ts", "time")
+_CHAT_REQUEST_INPUT_ALIASES = ("request_input", "请求参数", "request_params")
 
 
 def _normalize_raw_row(row: dict) -> dict:
     return {_RAW_COL_ALIASES.get(k, k): v for k, v in row.items()}
+
+
+def _normalize_header_keys(row: dict) -> dict:
+    """Strip BOM + surrounding whitespace from column names.
+
+    Production CSVs frequently have BOM-prefixed first column and a leading
+    space after each comma in the header (e.g. ` 租户ID`). DictReader keeps
+    those characters in the keys verbatim, so lookups by canonical name miss.
+    """
+    return {k.strip("﻿").strip(): v for k, v in row.items()}
 
 
 def _first_present(row: dict, keys: tuple[str, ...]) -> str:
@@ -146,7 +157,7 @@ def run_raw_mode(args, tokenizer) -> None:
         print("Input is empty.")
         return
 
-    rows = [_normalize_raw_row(r) for r in raw_rows]
+    rows = [_normalize_raw_row(_normalize_header_keys(r)) for r in raw_rows]
     out_records: list[dict] = []
     skipped_empty = 0
 
@@ -224,8 +235,9 @@ def run_chat_mode(args, tokenizer) -> None:
     skipped_no_json = 0
     skipped_no_messages = 0
 
-    for i, row in enumerate(raw_rows, 1):
-        ri = row.get("request_input", "") or ""
+    for i, raw_row in enumerate(raw_rows, 1):
+        row = _normalize_header_keys(raw_row)
+        ri = _first_present(row, _CHAT_REQUEST_INPUT_ALIASES)
         if not ri:
             skipped_no_json += 1
             continue
