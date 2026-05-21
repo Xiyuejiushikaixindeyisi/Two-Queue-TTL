@@ -58,8 +58,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 csv.field_size_limit(sys.maxsize)
 
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
-from lib.hf_tokenizer import apply_template  # noqa: E402
+# 注意: transformers 相关 import 延迟到 raw 模式内部, 这样 converted 模式
+# (复用 input_length, 不分词) 在任何 venv 都能跑, 不需要 transformers.
 
 # 列名别名 (中文/BOM/常见英文). timestamp 列在生产 CSV 里名字不固定, 多给几个.
 ALIASES = {
@@ -68,6 +68,8 @@ ALIASES = {
     "raw_prompt": ["raw_prompt", "请求参数", "prompt", "请求内容", "input", "messages"],
     "timestamp":  ["timestamp", "ts", "time", "时间", "时间戳", "请求时间",
                    "创建时间", "request_time", "time_stamp"],
+    # convert_trace.py 产出的 token 数列 (raw/chat 模式都写 input_length)
+    "input_length": ["input_length", "token_count", "n_tokens", "tokens", "input_len"],
 }
 
 
@@ -113,15 +115,21 @@ def to_seconds(ts_raw: str, unit: str) -> float | None:
 
 
 def parse_size_day(name: str) -> tuple[str | None, str | None, str | None]:
-    """从数据集名解析 (size, day, day_label). 例 'GLM-5-32K-0513' → ('32K','0513','5.13')."""
+    """从数据集名解析 (size, day, day_label). 例 'GLM-5-32K-0513' → ('32K','0513','5.13').
+
+    按 '-'/'_' 切 token 再判定, 避免把 '128K' 里的 '128' 误当成日期.
+    """
+    tokens = re.split(r"[-_]", name)
     size = None
-    m = re.search(r"(\d+)\s*[kK]\b", name)
-    if m:
-        size = f"{m.group(1)}K"
+    for t in tokens:
+        m = re.fullmatch(r"(\d+)[kK]", t)  # 纯 '<数字>K' token 才算 size
+        if m:
+            size = f"{m.group(1)}K"
+            break
     day = day_label = None
-    m = re.search(r"-(\d{3,4})(?:[^0-9]|$)", name)
-    if m:
-        day = m.group(1)
+    digit_tokens = [t for t in tokens if re.fullmatch(r"\d{3,4}", t)]  # 纯 3-4 位数字 = 日期
+    if digit_tokens:
+        day = digit_tokens[-1]
         s = day.zfill(4)
         day_label = f"{int(s[:2])}.{int(s[2:])}"  # MMDD → M.D
     return size, day, day_label
@@ -157,8 +165,12 @@ def discover_datasets(base_dir: Path) -> list[str]:
     return names
 
 
-def analyze_dataset(csv_files: list[Path], encoder, ts_unit: str) -> dict:
-    """读 dataset 的所有 CSV → 每分钟 token 涌入序列 → avg/P50/P80/P90 (两种口径)."""
+def analyze_dataset(csv_files: list[Path], count_fn, ts_unit: str) -> dict:
+    """读 dataset 的所有 CSV → 每分钟 token 涌入序列 → avg/P50/P80/P90 (两种口径).
+
+    count_fn(row) -> int 给出该请求的 token 数 (raw 模式现场分词; converted 模式
+    直接读 input_length 列).
+    """
     minute_tokens: dict[int, int] = {}
     n_requests = 0
     n_no_ts = 0
@@ -166,9 +178,7 @@ def analyze_dataset(csv_files: list[Path], encoder, ts_unit: str) -> dict:
     for csv_path in csv_files:
         with open(csv_path, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
-                prompt = get_col(row, "raw_prompt") or ""
-                ntok = len(apply_template(encoder.tokenizer, prompt, encoder.chat_mode)) \
-                    if prompt else 0
+                ntok = count_fn(row)
                 n_requests += 1
                 total_tokens += ntok
                 sec = to_seconds(get_col(row, "timestamp") or "", ts_unit)
@@ -213,7 +223,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--dir", type=Path, default=Path("data"), help="数据集根目录")
     p.add_argument("--datasets", type=str, default="",
-                   help="逗号分隔数据集名 (空=自动发现 <dir>/*/raw/*.csv)")
+                   help="逗号分隔数据集名 (raw 模式: <dir>/<name>/raw/*.csv; "
+                        "converted 模式: 直接给 .csv 文件路径). 空=自动发现")
+    p.add_argument("--input-format", choices=["raw", "converted"], default="raw",
+                   help="raw=读 raw_prompt 现场分词 (慢, 需 transformers); "
+                        "converted=复用 convert_trace.py 产出的 input_length 列 "
+                        "(秒级, 不需分词)")
     p.add_argument("--minute-mode", choices=["span", "active"], default="span",
                    help="写进 JSON 顶层(供绘图)的口径: span=含空闲分钟, active=仅有流量分钟")
     p.add_argument("--timestamp-unit", choices=["auto", "s", "ms", "us"], default="auto")
@@ -228,30 +243,65 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _clean_name(token: str) -> str:
+    """文件路径 → 干净的数据集名 (用于解析 size/day + 图标签)."""
+    p = Path(token)
+    name = p.stem if p.suffix == ".csv" else p.name
+    for suf in ("_4variant", "_converted"):
+        if name.endswith(suf):
+            name = name[: -len(suf)]
+    return name
+
+
 def main() -> None:
     args = parse_args()
-    encoder, meta = build_encoder_from_args(args)
-    if not hasattr(encoder, "tokenizer"):
-        raise SystemExit("cache 压力以 token 计, 需要 token 级 encoder "
-                         "(--encoder glm5_token / hf_token), 不能用 byte.")
-    print(f"Encoder: {meta['name']} (chat_mode={meta['chat_mode']}, "
-          f"tokenizer={meta['tokenizer_path']})")
+    if args.input_format == "raw":
+        from lib.hf_tokenizer import apply_template
+        from lib.prompt_encoder import build_encoder_from_args
+        encoder, meta = build_encoder_from_args(args)
+        if not hasattr(encoder, "tokenizer"):
+            raise SystemExit("cache 压力以 token 计, 需要 token 级 encoder "
+                             "(--encoder glm5_token / hf_token), 不能用 byte.")
+        print(f"Encoder: {meta['name']} (chat_mode={meta['chat_mode']}, "
+              f"tokenizer={meta['tokenizer_path']})")
 
-    names = [s for s in args.datasets.split(",") if s.strip()] \
-        or discover_datasets(args.dir)
+        def count_fn(row: dict) -> int:
+            prompt = get_col(row, "raw_prompt") or ""
+            return len(apply_template(encoder.tokenizer, prompt, encoder.chat_mode)) \
+                if prompt else 0
+    else:  # converted: 复用 convert_trace.py 写的 input_length, 不分词
+        meta = {"name": "from_converted",
+                "note": "token 数复用 convert_trace.py 的 input_length 列 (未重新分词)"}
+        print("复用 converted/4variant CSV 的 input_length 列 (不分词).")
+
+        def count_fn(row: dict) -> int:
+            v = get_col(row, "input_length")
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                return 0
+
+    if args.datasets.strip():
+        names = [s.strip() for s in args.datasets.split(",") if s.strip()]
+    elif args.input_format == "converted":
+        names = [str(p) for p in
+                 sorted(args.dir.glob("*_4variant.csv")) + sorted(args.dir.glob("*_converted.csv"))]
+    else:
+        names = discover_datasets(args.dir)
     if not names:
-        raise SystemExit(f"在 {args.dir} 下没找到数据集 (期望 <dir>/<name>/raw/*.csv).")
+        raise SystemExit(f"在 {args.dir} 下没找到数据集.")
 
     rows = []
     print(f"\n{'dataset':<22} {'size':>5} {'day':>6} {'reqs':>9} {'min':>6} "
           f"{'avg':>10} {'P50':>10} {'P80':>10} {'P90':>10}   (口径={args.minute_mode}, tok/min)")
-    for name in names:
-        csvs = resolve_csvs(name, args.dir)
+    for token in names:
+        csvs = resolve_csvs(token, args.dir)
+        name = _clean_name(token)
         size, day, day_label = parse_size_day(name)
         if not csvs:
             print(f"{name:<22} {'—':>5} {'—':>6}  (找不到 CSV, 跳过)")
             continue
-        res = analyze_dataset(csvs, encoder, args.timestamp_unit)
+        res = analyze_dataset(csvs, count_fn, args.timestamp_unit)
         sel = res[args.minute_mode]
         rows.append({
             "name": name, "size": size, "day": day, "day_label": day_label,
