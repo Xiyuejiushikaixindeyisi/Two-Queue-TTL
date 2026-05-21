@@ -60,7 +60,7 @@ LABELS = {
     },
     "zh": {
         "ylabel": "理想 KV cache 命中率 (%)",
-        "subtitle": "各模型上下文窗口的理想 KV cache 命中率",
+        "subtitle": "理想 KV cache命中率",
         "day": lambda i, d: f"第{i}天 ({d})",
         "count": lambda n: f"{n:,} 条",
     },
