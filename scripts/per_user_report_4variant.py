@@ -7,8 +7,8 @@ JSON with each variant's:
 
   - ideal_hit_rate     (prefix block hit rate, vllm-aligned)
   - chain_count        (number of significant chains after pruning)
-  - chain_avg_length   (average chain length in blocks)
-  - chain_coverage     (fraction of total block-visits falling on chains)
+  - chain_avg_length   (average chain length in blocks; ×block_size = tokens)
+  - chain_coverage     (请求占比: 完整共享 chain 的请求数 / 用户总请求数, 取覆盖率最高的那条 chain)
   - delta_vs_base      (each metric's delta against the base variant)
 
 Outputs
@@ -123,19 +123,23 @@ def _count_trie_hits(node: TrieNode) -> int:
     return hits
 
 
-def _summarize_chain_forest(forest: dict, total_blocks: int) -> dict:
-    """chain_count / chain_avg_length / chain_coverage."""
+def _summarize_chain_forest(forest: dict, total_requests: int) -> dict:
+    """chain_count / chain_avg_length(blocks) / chain_coverage(请求占比).
+
+    chain_coverage = 完整共享某条 chain 的请求数 / 用户总请求数, 取覆盖率最高的
+    那条 chain (c["coverage_count"] = chain 末端的请求数 = 完整走完该 chain 的
+    请求数). 之前的口径是 block-visit 占比, 已按需求改成"请求占比".
+    """
     chains = forest.get("chains", [])
     if not chains:
         return {"chain_count": 0, "chain_avg_length": 0.0, "chain_coverage": 0.0}
     lengths = [c["chain_length"] for c in chains]
-    # Coverage: sum of chain_length × coverage_count / total trie blocks.
-    # Monotonic in "fraction of block-visits falling on a discovered chain".
-    coverage_blocks = sum(c["chain_length"] * c["coverage_count"] for c in chains)
+    top_share = (max(c["coverage_count"] for c in chains) / total_requests
+                 if total_requests else 0.0)
     return {
         "chain_count": len(chains),
         "chain_avg_length": sum(lengths) / len(lengths),
-        "chain_coverage": coverage_blocks / total_blocks if total_blocks else 0.0,
+        "chain_coverage": top_share,
     }
 
 
@@ -163,7 +167,7 @@ def analyze_user_4variant(
             "requests": n_req,
             "blocks": n_blocks,
             "ideal_hit_rate": hits / n_blocks if n_blocks else 0.0,
-            **_summarize_chain_forest(forest, n_blocks),
+            **_summarize_chain_forest(forest, n_req),
         }
     return out
 
@@ -196,10 +200,18 @@ def parse_args() -> argparse.Namespace:
                    help="4-variant CSV from convert_trace.py --mode chat")
     p.add_argument("--output-dir", required=True,
                    help="Directory to write per-user JSON + summary")
+    p.add_argument("--users", type=str, default="",
+                   help="逗号分隔的 user_id, 只分析这些 (覆盖 --top-k-users). "
+                        "不给且给了 --names 时, 分析 --names 里的所有 user.")
+    p.add_argument("--names", type=str, default="",
+                   help="JSON: {user_id: 真实名称}; 用于 HTML 显示真实名称, "
+                        "且在未给 --users 时作为分析对象列表")
+    p.add_argument("--block-size", type=int, default=128,
+                   help="每个 block 的 token 数 (与 convert 一致, 用于 token 换算)")
     p.add_argument("--top-k-users", type=int, default=3,
-                   help="Analyze the top-K users by request count")
+                   help="Analyze the top-K users by request count (无 --users/--names 时)")
     p.add_argument("--min-requests", type=int, default=2,
-                   help="Skip users with fewer than this many requests")
+                   help="Skip users with fewer than this many requests (仅 top-k 模式)")
     p.add_argument("--mc-branch-thr",   type=float, default=DEFAULT_MC_BRANCH_THRESHOLD)
     p.add_argument("--mc-cov-thr",      type=float, default=DEFAULT_MC_COVERAGE_THRESHOLD)
     p.add_argument("--mc-min-len",      type=int,   default=DEFAULT_MIN_CHAIN_LENGTH)
@@ -210,6 +222,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    names_map: dict[str, str] = {}
+    if args.names:
+        with open(args.names, encoding="utf-8") as f:
+            names_map = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
 
     print(f"Loading 4-variant trace: {args.trace}")
     users, variants = load_4variant_trace(Path(args.trace))
@@ -222,23 +239,42 @@ def main() -> None:
         "min_chain_coverage": args.mc_min_cov,
         "max_chains":         args.mc_max_chains,
     }
+    params = {**chain_kwargs, "block_size": args.block_size}
 
-    selected = sorted(
-        ((uid, recs) for uid, recs in users.items() if len(recs) >= args.min_requests),
-        key=lambda kv: -len(kv[1]),
-    )[:args.top_k_users]
+    # 选择对象: 显式 --users > --names 的 key > top-k
+    requested = None
+    if args.users.strip():
+        requested = [u.strip() for u in args.users.split(",") if u.strip()]
+    elif names_map:
+        requested = list(names_map.keys())
+
+    if requested:
+        selected = []
+        for uid in requested:
+            if uid in users:
+                selected.append((uid, users[uid]))
+            else:
+                print(f"  ⚠ 请求的 user 不在 trace 中, 跳过: {uid}")
+    else:
+        selected = sorted(
+            ((uid, recs) for uid, recs in users.items() if len(recs) >= args.min_requests),
+            key=lambda kv: -len(kv[1]),
+        )[:args.top_k_users]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary: list[dict] = []
     for user_id, records in selected:
-        print(f"  Analyzing user {user_id} ({len(records)} requests)...")
+        name = names_map.get(user_id, "")
+        print(f"  Analyzing user {user_id} ({name or '—'}, {len(records)} requests)...")
         per_variant = analyze_user_4variant(records, variants, chain_kwargs)
         deltas = compute_deltas_vs_base(per_variant)
 
         user_detail = {
             "user_id": user_id,
+            "name": name,
+            "block_size": args.block_size,
             "request_count": len(records),
             "variants_analyzed": variants,
             "variants": per_variant,
@@ -250,6 +286,7 @@ def main() -> None:
 
         row = {
             "user_id": user_id,
+            "name": name,
             "request_count": len(records),
         }
         for v in variants:
@@ -261,6 +298,8 @@ def main() -> None:
         json.dump({
             "trace": str(Path(args.trace).resolve()),
             "variants": variants,
+            "params": params,
+            "block_size": args.block_size,
             "users": summary,
         }, f, ensure_ascii=False, indent=2)
 

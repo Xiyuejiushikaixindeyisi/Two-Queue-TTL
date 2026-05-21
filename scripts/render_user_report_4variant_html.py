@@ -58,6 +58,12 @@ td.delta-zero { color: #718096; }
 .user-section { margin-top: 40px; padding: 12px 18px; background: #f7fafc;
   border-left: 3px solid #4299e1; border-radius: 3px; }
 .user-section h3 { margin-top: 0; }
+.user-section .uid { color: #718096; font-weight: normal; font-size: 0.62em;
+  font-family: 'SF Mono', Consolas, Menlo, monospace; }
+.defs { background: #ebf4ff; border-left: 4px solid #4299e1; padding: 10px 16px;
+  margin: 12px 0 4px; font-size: 0.85em; color: #2d3748; }
+.defs ul { margin: 6px 0 0; padding-left: 20px; }
+.defs li { margin: 3px 0; }
 """
 
 
@@ -140,7 +146,32 @@ def _render_summary_table(summary: dict) -> str:
     return "\n".join(rows)
 
 
-def _render_per_user_section(user_id: str, user_detail: dict) -> str:
+def _defs_block(params: dict, block_size: int) -> str:
+    """指标定义说明块 (chain / chain 数 / avg 长度→token / 覆盖率→请求占比)."""
+    cov = params.get("mc_cov_thr", 0.05)
+    min_len = params.get("min_chain_length", 10)
+    min_cov = params.get("min_chain_coverage", 0.01)
+    max_chains = params.get("max_chains", 50)
+    return (
+        '<div class="defs">'
+        '<strong>指标定义</strong>'
+        '<ul>'
+        '<li><b>chain</b>: prefix trie 中一条公共前缀路径 —— 从根开始, 每个 '
+        f'block 都被 ≥ {cov * 100:g}% 的请求共享; 遇到多个都 ≥ {cov * 100:g}% '
+        '的分叉时分裂成多条 chain, 直到没有满足阈值的后继 block 为止。仅保留长度 ≥ '
+        f'{min_len} 个 block、且末端仍被 ≥ {min_cov * 100:g}% 请求共享的 chain '
+        f'(最多 {max_chains} 条)。</li>'
+        '<li><b>chain 数</b>: 满足上述条件的 chain 条数。</li>'
+        f'<li><b>chain avg 长度</b>: 各 chain 的平均 block 数 × {block_size} = token 数 '
+        '(表中已换算为 tokens, 括号内为 blocks)。</li>'
+        '<li><b>chain 覆盖率 (请求占比)</b>: 完整共享某条 chain 的请求数 ÷ '
+        '该用户总请求数; 表中取覆盖率最高的那条 chain。</li>'
+        '</ul></div>'
+    )
+
+
+def _render_per_user_section(user_id: str, user_detail: dict,
+                             block_size: int, name: str) -> str:
     """One section per user with the 4-variant breakdown."""
     variants = user_detail["variants_analyzed"]
     per = user_detail["variants"]
@@ -148,7 +179,10 @@ def _render_per_user_section(user_id: str, user_detail: dict) -> str:
 
     rows = []
     rows.append('<div class="user-section">')
-    rows.append(f'<h3>{html.escape(str(user_id))} <span style="color:#718096;font-weight:normal;font-size:0.8em;">'
+    # 标题: 真实名称 (大) + app-id (小, 等宽)
+    title = (f'{html.escape(name)} <span class="uid">{html.escape(str(user_id))}</span>'
+             if name else f'{html.escape(str(user_id))}')
+    rows.append(f'<h3>{title} <span style="color:#718096;font-weight:normal;font-size:0.8em;">'
                 f'({user_detail["request_count"]} 请求)</span></h3>')
 
     # 4-variant table: rows = metrics, columns = variants
@@ -159,12 +193,13 @@ def _render_per_user_section(user_id: str, user_detail: dict) -> str:
     rows.append(f'<thead><tr><th class="first">指标</th>{cols_header}</tr></thead><tbody>')
 
     metrics = [
-        ("理想命中率",   "ideal_hit_rate",    True,  _fmt_pct),
-        ("chain 数",     "chain_count",       False, lambda x: f"{x}"),
-        ("chain avg 长度", "chain_avg_length", True, lambda x: f"{x:.2f}"),
-        ("chain 覆盖率", "chain_coverage",    True,  _fmt_pct),
+        ("理想命中率",            "ideal_hit_rate",   _fmt_pct),
+        ("chain 数",              "chain_count",      lambda x: f"{x}"),
+        ("chain avg 长度",        "chain_avg_length",
+         lambda x: f"{x * block_size:,.0f} tokens（{x:.2f} blocks）"),
+        ("chain 覆盖率 (请求占比)", "chain_coverage",   _fmt_pct),
     ]
-    for label, key, higher_better, fmt in metrics:
+    for label, key, fmt in metrics:
         cells = []
         for v in variants:
             val = per[v].get(key, 0)
@@ -213,7 +248,11 @@ def _load_user_details(input_dir: Path) -> dict[str, dict]:
     return out
 
 
-def render_html(summary: dict, user_details: dict[str, dict], app_name: str) -> str:
+def render_html(summary: dict, user_details: dict[str, dict], app_name: str,
+                names_map: dict[str, str] | None = None) -> str:
+    names_map = names_map or {}
+    block_size = summary.get("block_size") or summary.get("params", {}).get("block_size", 128)
+    params = summary.get("params", {})
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     parts: list[str] = []
     parts.append("<!DOCTYPE html>")
@@ -253,13 +292,15 @@ def render_html(summary: dict, user_details: dict[str, dict], app_name: str) -> 
     )
 
     parts.append("<h2>2. Per-user 拆解</h2>")
+    parts.append(_defs_block(params, block_size))
     # Sort by request_count desc
     users = sorted(summary["users"], key=lambda u: -u["request_count"])
     for u in users:
         detail = user_details.get(u["user_id"])
         if detail is None:
             continue
-        parts.append(_render_per_user_section(u["user_id"], detail))
+        name = names_map.get(u["user_id"]) or u.get("name") or detail.get("name") or ""
+        parts.append(_render_per_user_section(u["user_id"], detail, block_size, name))
 
     parts.append("<h2>3. 方法学</h2>")
     parts.append(
@@ -290,6 +331,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", required=True, help="Output HTML path")
     p.add_argument("--app-name", default="<app>",
                    help="App identifier shown in the HTML title")
+    p.add_argument("--names", default="",
+                   help="可选 JSON: {user_id: 真实名称}; 覆盖分析时存的名称 "
+                        "(不重跑分析也能改显示名)")
     return p.parse_args()
 
 
@@ -306,9 +350,14 @@ def main() -> None:
     with open(summary_path, encoding="utf-8") as f:
         summary: dict[str, Any] = json.load(f)
 
+    names_map: dict[str, str] = {}
+    if args.names:
+        with open(args.names, encoding="utf-8") as f:
+            names_map = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
     user_details = _load_user_details(input_dir)
 
-    html_text = render_html(summary, user_details, args.app_name)
+    html_text = render_html(summary, user_details, args.app_name, names_map)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html_text, encoding="utf-8")
