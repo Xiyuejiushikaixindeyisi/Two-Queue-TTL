@@ -1,0 +1,49 @@
+{
+  "_comment": "每个 user 一张 grouped bar 图. groups = 模型上下文窗口 (x 轴大组); 每组 days[] 一根柱子 (左→右). hit_rate 单位=百分比 (0-100). app=原名(可中文,仅备注); app_en=图标题用的英文(本机无中文字体). 补数据往 users[] 加对象.",
+  "users": [
+    {
+      "app": "EurekaX",
+      "app_en": "EurekaX",
+      "user_id": "S00000000000000000000000000000961",
+      "days": ["5.13", "5.14"],
+      "groups": [
+        {"name": "GLM-5-32K",  "days": [{"requests": 1374, "hit_rate": 68.27}, {"requests": 3722, "hit_rate": 66.48}]},
+        {"name": "GLM-5-64K",  "days": [{"requests": 601,  "hit_rate": 61.13}, {"requests": 716,  "hit_rate": 68.63}]},
+        {"name": "GLM-5-128K", "days": [{"requests": 341,  "hit_rate": 73.87}, {"requests": 685,  "hit_rate": 86.05}]}
+      ]
+    },
+    {
+      "app": "财经智能问数",
+      "app_en": "Fin Smart Q&A",
+      "user_id": "S00000000000000000000000000003734",
+      "days": ["5.13", "5.14"],
+      "groups": [
+        {"name": "GLM-5-32K",  "days": [{"requests": 5036, "hit_rate": 72.77}, {"requests": 6248, "hit_rate": 68.71}]},
+        {"name": "GLM-5-64K",  "days": [{"requests": 799,  "hit_rate": 65.22}, {"requests": 882,  "hit_rate": 78.45}]},
+        {"name": "GLM-5-128K", "days": [{"requests": 149,  "hit_rate": 64.04}, {"requests": 43,   "hit_rate": 79.76}]}
+      ]
+    },
+    {
+      "app": "财经经营智能分析",
+      "app_en": "Fin Operations Analytics",
+      "user_id": "com.huawei.fin.bfd.lgrp",
+      "days": ["5.13", "5.14"],
+      "groups": [
+        {"name": "GLM-5-32K",  "days": [{"requests": 2378, "hit_rate": 79.42}, {"requests": 2271, "hit_rate": 69.34}]},
+        {"name": "GLM-5-64K",  "days": [{"requests": 1015, "hit_rate": 70.92}, {"requests": 1409, "hit_rate": 72.59}]},
+        {"name": "GLM-5-128K", "days": [{"requests": 99,   "hit_rate": 24.83}, {"requests": 99,   "hit_rate": 72.81}]}
+      ]
+    },
+    {
+      "app": "法律分析",
+      "app_en": "Legal Analysis",
+      "user_id": "fcc54a9a2ef64bf0a26016389681550e",
+      "days": ["5.13", "5.14"],
+      "groups": [
+        {"name": "GLM-5-32K",  "days": [{"requests": 171, "hit_rate": 35.25}, {"requests": 333, "hit_rate": 42.63}]},
+        {"name": "GLM-5-64K",  "days": [{"requests": 76,  "hit_rate": 57.05}, {"requests": 115, "hit_rate": 60.54}]},
+        {"name": "GLM-5-128K", "days": [{"requests": 6,   "hit_rate": 0.0},   {"requests": 15,  "hit_rate": 0.0}]}
+      ]
+    }
+  ]
+}
