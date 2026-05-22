@@ -97,4 +97,5 @@ Thumbs.db
 # ── Runtime junk (defensive) ────────────────────────────────────────────────
 *.log
 nohup.out
-.claude/
+.claude/*
+!.claude/skills/
