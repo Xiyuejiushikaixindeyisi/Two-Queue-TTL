@@ -68,6 +68,77 @@ flat:                            nested:
 
 ---
 
+## 🚀 新数据集上手 (skill 一键跑)
+
+> 这两条现网分析流程已封装成项目 skill (`.claude/skills/`): `git pull` 后可直接
+> `/csv-prod-analysis` / `/txt-prod-analysis` 调用, 或用自然语言让 agent 自动触发。
+> 下面是"拿到新数据集后怎么用"; 背后的分阶段 CLI 见后文阶段 1/2/3。
+
+### A. 新 CSV 数据集 (生产 trace)
+
+`/csv-prod-analysis <model_dir1,model_dir2,...> [tok=glm5|qwen3]`
+→ 阶段 1 跨数据集筛选 + 阶段 3 完整 HTML。
+
+**第 1 步 · 放数据**(参数 = **目录名**, 不是 csv 路径):
+```bash
+mkdir -p data/GLM-V5-32K-0516/raw
+cp /拿到的路径/GLM-V5-32K-0516.csv data/GLM-V5-32K-0516/raw/
+```
+- 目录名自取(建议含模型+窗口+日期), **传给 skill 的参数必须与目录名完全一致**。
+- 同一数据集可多 csv(字典序拼接); 多个不同数据集就建多个 `data/<dir>/raw/`。
+
+**第 2 步 · 确认 CSV 格式**(skill 不转格式): 4 列, 列名支持中文别名 + UTF-8 BOM
+(见上文「数据集格式 · A. CSV」)。timestamp 缺 → 时序图退化, hit_rate/chain 正常。
+
+**第 3 步 · 调用**:
+```text
+/csv-prod-analysis GLM-V5-32K-0516              # GLM, glm5 为默认可省
+/csv-prod-analysis <dir> qwen3                  # Qwen 数据集
+/csv-prod-analysis dir1,dir2,dir3               # 多数据集一起
+```
+或自然语言: "我把新数据集放到 `data/GLM-V5-32K-0516/raw/`, 用 GLM-5 对它做现网分析"。
+
+**要告诉 agent**: ① 数据集目录名 ② tokenizer 家族(GLM→`glm5` 默认 / Qwen→`qwen3`)
+③ 数据已就位。可选: csv 还在别处就给源路径让 agent 先搬; 本机 venv 名若非 `.venv_glm5`;
+是否只跑阶段 1。
+
+**产出**(每数据集 3 类 HTML, 阅读顺序):
+`outputs/<dir>/per_user_chains.html`(全局 + chain 阈值扫描图)
+→ `.../per_user_reports/cross_user_summary.html`(跨用户汇总)
+→ `.../per_user_reports/<uid>/user_report.html`(单 user 7 节)。
+
+### B. 新 txt 数据集 (同事散文件)
+
+`/txt-prod-analysis <txt根目录> <model_dir> <user_id> [tok=qwen3|glm5]`
+→ txt 树→CSV + HTML pipeline(跳过阶段 1; 无 timestamp 时序图 graceful 退化)。
+
+**第 1 步 · 准备 txt 目录**(无需搬进 `data/`): 1 txt = 1 请求, 文件名任意/中文 OK,
+flat 或 nested 均可, 你只要知道**根目录路径**:
+```
+/home/ma-user/work/Qwen-V3-8B-0518/
+  a.txt   b.txt   ...
+```
+
+**第 2 步 · 想好两个名字**: `<model_dir>` = 落地数据集名(skill 会生成
+`data/<model_dir>/raw/converted.csv`); `<user_id>` = 整个 txt 集算作的那一个用户标识。
+
+**第 3 步 · 调用**:
+```text
+/txt-prod-analysis /home/ma-user/work/Qwen-V3-8B-0518 Qwen-V3-8B-0518 qwen3_app
+/txt-prod-analysis <txt根目录> <model_dir> <user_id> glm5    # 换 GLM tokenizer
+```
+或自然语言: "对 `/path/to/txt` 这堆 txt 做现网分析, 落地名 `Qwen-V3-8B-0518`,
+user 叫 `qwen3_app`, 用 Qwen3 tokenizer"。
+
+**要告诉 agent**: ① txt 根目录路径 ② 落地 model_dir 名 ③ user_id
+④ tokenizer 家族(默认 `qwen3`)。
+
+**产出**(单 user): `outputs/<model_dir>/per_user_reports/<user_id>/user_report.html`
+—— §3 user metrics / §6 LCP / §7 chain forest ✅; §4/§5 时序卡片因无 timestamp
+显示 caveat ⚠️。
+
+---
+
 ## 阶段 1: 跨数据集筛选
 
 **目的**: 一次看 N 个数据集 × top-K user 的 hit_rate + GB/min, 选高研究价值场景.
