@@ -31,9 +31,11 @@ import hashlib
 import json
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.chains import TrieNode, trie_insert  # noqa: E402
 
 # Some raw_prompt fields can be very large; lift csv field size cap.
 csv.field_size_limit(sys.maxsize)
@@ -62,31 +64,7 @@ def compute_prefix_path_keys(blocks: list[bytes]) -> list[bytes]:
     return keys
 
 
-# ---------------------------------------------------------------------------
-# Trie
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TrieNode:
-    count: int = 0
-    children: dict = field(default_factory=dict)
-    sample_request_id: Optional[str] = None  # any request following this path
-
-
-def trie_insert(root: TrieNode, keys: list[bytes], request_id: str) -> None:
-    node = root
-    node.count += 1
-    if node.sample_request_id is None:
-        node.sample_request_id = request_id
-    for key in keys:
-        child = node.children.get(key)
-        if child is None:
-            child = TrieNode()
-            node.children[key] = child
-        child.count += 1
-        if child.sample_request_id is None:
-            child.sample_request_id = request_id
-        node = child
+# TrieNode / trie_insert moved to lib.chains (imported above).
 
 
 # ---------------------------------------------------------------------------

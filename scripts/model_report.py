@@ -26,116 +26,37 @@ CSV 列: request_id / user_id / raw_prompt / timestamp, 支持中文别名 (请�
 from __future__ import annotations
 
 import argparse
-import csv
 import html
 import sys
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO))
-sys.path.insert(0, str(_REPO / "scripts"))
-
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.csv_trace import get_col, iter_rows, parse_ts, resolve_app  # noqa: E402
+from lib.hit_rate import lcp, lcp_histogram  # noqa: E402
 from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
-from per_user_report_analyzer import lcp_histogram, percentile_int  # noqa: E402
-from render_user_report_html import svg_cdf_log_x, svg_histogram  # noqa: E402
-
-csv.field_size_limit(sys.maxsize)
-
-ALIASES = {"请求ID": "request_id", "租户ID": "user_id", "请求参数": "raw_prompt"}
-
-
-def get_col(row: dict, target: str) -> str | None:
-    for k, v in ALIASES.items():
-        if v == target and k in row:
-            return row[k]
-    return row.get(target)
-
-
-def _resolve_app(row: dict, app_col: str | None) -> str:
-    if app_col:
-        return row.get(app_col) or ""
-    return get_col(row, "user_id") or ""
-
-
-def _parse_ts(raw: str | None) -> int | None:
-    try:
-        return int(float(raw))
-    except (ValueError, TypeError):
-        return None
-
-
-def _reuse_quantiles(reuse_times: list[int]) -> dict:
-    """P50/P80/P90/P95/MAX (+avg/count). 加了 P90 (现有 analyzer 没有)."""
-    if not reuse_times:
-        return {"p50": 0, "p80": 0, "p90": 0, "p95": 0, "max": 0, "avg": 0.0, "count": 0}
-    s = sorted(reuse_times)
-    return {
-        "p50": percentile_int(s, 50),
-        "p80": percentile_int(s, 80),
-        "p90": percentile_int(s, 90),
-        "p95": percentile_int(s, 95),
-        "max": s[-1],
-        "avg": round(sum(s) / len(s), 2),
-        "count": len(s),
-    }
-
-
-def _reuse_cdf_points(reuse_times: list[int], n_points: int = 50) -> list[dict]:
-    """Log-spaced CDF points [{t_seconds, cumulative_pct}] (供 svg_cdf_log_x)."""
-    if not reuse_times:
-        return []
-    import math
-    s = sorted(reuse_times)
-    n = len(s)
-    max_rt = s[-1]
-    if max_rt <= 1:
-        grid = [0, max_rt]
-    else:
-        log_max = math.log10(max_rt)
-        grid = sorted({0} | {
-            max(1, int(round(10 ** (i * log_max / (n_points - 1))))) for i in range(n_points)
-        })
-    pts = []
-    for t in grid:
-        cnt = sum(1 for rt in s if rt <= t)
-        pts.append({"t_seconds": t, "cumulative_pct": round(cnt / n * 100, 3)})
-    return pts
-
-
-def fmt_duration(seconds: int | None) -> str:
-    if not seconds or seconds <= 0:
-        return "—"
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 24)
-    parts = []
-    if d:
-        parts.append(f"{d}d")
-    if h:
-        parts.append(f"{h}h")
-    if m:
-        parts.append(f"{m}m")
-    if s and not d:
-        parts.append(f"{s}s")
-    return " ".join(parts) or "0s"
+from lib.reuse_time import (  # noqa: E402
+    ReuseTracker,
+    fmt_duration,
+    reuse_cdf_points,
+    reuse_quantiles,
+)
+from lib.svg_charts import svg_cdf_log_x, svg_histogram  # noqa: E402
 
 
 def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> dict:
     """单 CSV → 模型级 + 每 app 指标 + 模型级 reuse_time. 单遍 (每 prompt 只编码一次)."""
     records: list[tuple[str, int | None, str]] = []
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            app = _resolve_app(row, app_col)
-            ts = _parse_ts(get_col(row, "timestamp"))
-            prompt = get_col(row, "raw_prompt") or ""
-            records.append((app, ts, prompt))
+    for row in iter_rows(csv_path):
+        app = resolve_app(row, app_col)
+        ts = parse_ts(get_col(row, "timestamp"))
+        prompt = get_col(row, "raw_prompt") or ""
+        records.append((app, ts, prompt))
 
     # 时序排序 (reuse_time 依赖顺序); 无 ts 的排到末尾, stable
     records.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0))
 
     model_seen: set[bytes] = set()
-    model_last_seen: dict[bytes, int] = {}
-    reuse_times: list[int] = []
+    tracker = ReuseTracker()
     m_hit = m_blocks = m_tokens = m_reqs = 0
     earliest: int | None = None
     latest: int | None = None
@@ -167,30 +88,14 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
         a["blocks"] += len(keys)
 
         # 模型级 pooled LCP
-        lcp = 0
-        for k in keys:
-            if k in model_seen:
-                lcp += 1
-            else:
-                break
-        m_hit += lcp
-
-        # 模型级 reuse_time (chronological)
+        m_hit += lcp(keys, model_seen)
+        # 模型级 reuse_time (chronological; 无 ts 的请求已排到末尾)
         if ts is not None:
-            for k in keys:
-                prev = model_last_seen.get(k)
-                if prev is not None:
-                    reuse_times.append(ts - prev)
-                model_last_seen[k] = ts
+            tracker.add(keys, ts)
         model_seen.update(keys)
 
         # APP 级隔离 LCP
-        alcp = 0
-        for k in keys:
-            if k in a["seen"]:
-                alcp += 1
-            else:
-                break
+        alcp = lcp(keys, a["seen"])
         a["hit"] += alcp
         a["lcps"].append(alcp)
         a["seen"].update(keys)
@@ -219,8 +124,8 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
             "unique_blocks": len(model_seen),
             "n_apps": len(apps),
         },
-        "reuse_quantiles": _reuse_quantiles(reuse_times),
-        "reuse_cdf": _reuse_cdf_points(reuse_times),
+        "reuse_quantiles": reuse_quantiles(tracker.gaps),
+        "reuse_cdf": reuse_cdf_points(tracker.gaps),
         "apps": app_rows,
     }
 

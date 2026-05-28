@@ -19,6 +19,7 @@ from lib.prompt_rewrite.patterns import (
     load_patterns_config,
 )
 from lib.prompt_rewrite.detect import (
+    VARIANTS,
     apply_variant,
     detect_dynamic_labels,
     has_dynamic_content,
@@ -31,6 +32,7 @@ from lib.prompt_rewrite.detect import (
 __all__ = [
     "DEFAULT_PATTERNS",
     "DEFAULT_UNIX_PATH_ROOTS",
+    "VARIANTS",
     "Patterns",
     "apply_variant",
     "build_patterns",

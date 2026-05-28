@@ -28,16 +28,16 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-# Reuse Step 1.1/1.2 primitives
+# Reuse Step 1.1/1.2 primitives + centralized chain algorithm (lib.chains)
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.chains import TrieNode, trie_insert  # noqa: E402
 from verify_chain_path_closure import (  # noqa: E402
-    TrieNode,
     compute_prefix_path_keys,
     discover_csv_files,
     find_lcp,
     iter_raw_records,
     split_blocks,
-    trie_insert,
 )
 
 

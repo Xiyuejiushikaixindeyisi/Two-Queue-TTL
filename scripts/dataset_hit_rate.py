@@ -40,30 +40,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.csv_trace import get_col, iter_rows, parse_ts, resolve_app  # noqa: E402
+from lib.hit_rate import lcp  # noqa: E402
 from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
-
-csv.field_size_limit(sys.maxsize)
-
-ALIASES = {
-    "请求ID":   "request_id",
-    "租户ID":   "user_id",
-    "请求参数": "raw_prompt",
-}
-
-
-def get_col(row: dict, target: str) -> str | None:
-    """支持中文列名 / UTF-8 BOM 的列读取 (与 target_users_hit_rate.py 对齐)."""
-    for k, v in ALIASES.items():
-        if v == target and k in row:
-            return row[k]
-    return row.get(target)
-
-
-def _resolve_app(row: dict, app_col: str | None) -> str | None:
-    """取一行的 app-id. 默认用 user_id/租户ID 列; --app-col 指定其它列名."""
-    if app_col:
-        return row.get(app_col)
-    return get_col(row, "user_id")
 
 
 def analyze_dataset(
@@ -87,39 +66,29 @@ def analyze_dataset(
     earliest: int | None = None
     latest: int | None = None
 
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            uid = _resolve_app(row, app_col)
-            if app_id is not None and uid != app_id:
-                continue
-            reqs += 1
-            if uid:
-                apps.add(uid)
+    for row in iter_rows(csv_path):
+        uid = resolve_app(row, app_col)
+        if app_id is not None and uid != app_id:
+            continue
+        reqs += 1
+        if uid:
+            apps.add(uid)
 
-            ts_raw = get_col(row, "timestamp") or ""
-            try:
-                ts = int(float(ts_raw))
-                if earliest is None or ts < earliest:
-                    earliest = ts
-                if latest is None or ts > latest:
-                    latest = ts
-            except (ValueError, TypeError):
-                pass  # 缺 ts 不影响命中率, 只影响 GB/min
+        ts = parse_ts(get_col(row, "timestamp"))
+        if ts is not None:
+            if earliest is None or ts < earliest:
+                earliest = ts
+            if latest is None or ts > latest:
+                latest = ts
 
-            prompt = get_col(row, "raw_prompt") or ""
-            if not prompt:
-                continue
+        prompt = get_col(row, "raw_prompt") or ""
+        if not prompt:
+            continue
 
-            keys = encoder.encode(prompt)
-            lcp = 0
-            for k in keys:
-                if k in seen:
-                    lcp += 1
-                else:
-                    break
-            hit += lcp
-            total += len(keys)
-            seen.update(keys)
+        keys = encoder.encode(prompt)
+        hit += lcp(keys, seen)
+        total += len(keys)
+        seen.update(keys)
 
     unique = len(seen)
     ideal = (hit / total) if total else 0.0

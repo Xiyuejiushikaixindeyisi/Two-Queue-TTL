@@ -29,8 +29,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import html
 import json
 import sys
@@ -40,72 +38,36 @@ _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "scripts"))
 
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
-from lib.prompt_rewrite import DEFAULT_PATTERNS, apply_variant, load_patterns_config  # noqa: E402
-from lib.prompt_rewrite.chat_render import render_to_tokens  # noqa: E402
-from multi_chain_finder import (  # noqa: E402
+from lib.chain_key import sha256_chain_tokens  # noqa: E402
+from lib.chains import (  # noqa: E402
     DEFAULT_MAX_CHAINS,
     DEFAULT_MC_BRANCH_THRESHOLD,
     DEFAULT_MC_COVERAGE_THRESHOLD,
     DEFAULT_MIN_CHAIN_COVERAGE,
     DEFAULT_MIN_CHAIN_LENGTH,
+    build_trie,
+    count_trie_hits,
     find_chain_forest,
 )
-from per_user_report_4variant import VARIANTS, _build_trie, _count_trie_hits  # noqa: E402
-from per_user_report_analyzer import lcp_histogram  # noqa: E402
-from model_report import _reuse_cdf_points, _reuse_quantiles, fmt_duration  # noqa: E402
-from render_user_report_html import svg_cdf_log_x, svg_histogram  # noqa: E402
-
-csv.field_size_limit(sys.maxsize)
-
-ALIASES = {"请求ID": "request_id", "租户ID": "user_id", "请求参数": "raw_prompt"}
-_REQUEST_INPUT_ALIASES = ("raw_prompt", "request_input", "请求参数", "request_params")
-
-
-def _norm_keys(row: dict) -> dict:
-    return {(k or "").lstrip("﻿").strip(): v for k, v in row.items()}
-
-
-def get_col(row: dict, target: str) -> str | None:
-    for k, v in ALIASES.items():
-        if v == target and k in row:
-            return row[k]
-    return row.get(target)
-
-
-def _first_present(row: dict, keys) -> str | None:
-    for k in keys:
-        if row.get(k):
-            return row[k]
-    return None
-
-
-def _resolve_app(row: dict, app_col: str | None) -> str:
-    if app_col:
-        return row.get(app_col) or ""
-    return get_col(row, "user_id") or ""
-
-
-def _parse_ts(raw) -> int | None:
-    try:
-        return int(float(raw))
-    except (ValueError, TypeError):
-        return None
-
-
-def _chain_bytes(token_ids: list[int], block_size: int) -> list[bytes]:
-    """token_ids → SHA-256 chain block keys (bytes). 与 HFTokenEncoder.encode 同算法。"""
-    keys: list[bytes] = []
-    prev = b""
-    for i in range(0, len(token_ids), block_size):
-        block = token_ids[i:i + block_size]
-        payload = ",".join(str(t) for t in block).encode("utf-8")
-        h = hashlib.sha256()
-        h.update(prev)
-        h.update(payload)
-        prev = h.digest()
-        keys.append(prev)
-    return keys
+from lib.csv_trace import (  # noqa: E402
+    REQUEST_INPUT_ALIASES,
+    first_present,
+    get_col,
+    iter_rows,
+    parse_ts,
+    resolve_app,
+)
+from lib.hit_rate import lcp, lcp_histogram  # noqa: E402
+from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
+from lib.prompt_rewrite import (  # noqa: E402
+    DEFAULT_PATTERNS,
+    VARIANTS,
+    apply_variant,
+    load_patterns_config,
+)
+from lib.prompt_rewrite.chat_render import render_to_tokens  # noqa: E402
+from lib.reuse_time import ReuseTracker, fmt_duration, reuse_cdf_points, reuse_quantiles  # noqa: E402
+from lib.svg_charts import svg_cdf_log_x, svg_histogram  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -117,46 +79,44 @@ def build_records_from_csv(csv_path: Path, app_id: str, tokenizer, patterns,
     records: list[dict] = []
     counts = {"matched": 0, "no_json": 0, "no_messages": 0, "render_error": 0}
     first_err = ""
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        for i, raw in enumerate(csv.DictReader(f)):
-            row = _norm_keys(raw)
-            if _resolve_app(row, app_col) != app_id:
-                continue
-            counts["matched"] += 1
-            ri = _first_present(row, _REQUEST_INPUT_ALIASES)
-            if not ri:
-                counts["no_json"] += 1
-                continue
-            try:
-                body = json.loads(ri)
-            except (json.JSONDecodeError, TypeError):
-                counts["no_json"] += 1
-                continue
-            tools = body.get("tools") or []
-            messages = body.get("messages") or []
-            if not messages:
-                counts["no_messages"] += 1
-                continue
-            try:
-                hash_ids: dict[str, list[bytes]] = {}
-                base_tokens = 0
-                for v in variants:
-                    tt = apply_variant(v, tools, patterns=patterns)
-                    token_ids = render_to_tokens(tokenizer, messages, tt)
-                    hash_ids[v] = _chain_bytes(token_ids, block_size)
-                    if v == "base":
-                        base_tokens = len(token_ids)
-            except Exception as e:  # noqa: BLE001
-                counts["render_error"] += 1
-                if not first_err:
-                    first_err = f"{type(e).__name__}: {e}"
-                continue
-            records.append({
-                "request_id": str(i),
-                "ts": _parse_ts(get_col(row, "timestamp")),
-                "input_length": base_tokens,
-                "hash_ids": hash_ids,
-            })
+    for i, row in enumerate(iter_rows(csv_path)):
+        if resolve_app(row, app_col) != app_id:
+            continue
+        counts["matched"] += 1
+        ri = first_present(row, REQUEST_INPUT_ALIASES)
+        if not ri:
+            counts["no_json"] += 1
+            continue
+        try:
+            body = json.loads(ri)
+        except (json.JSONDecodeError, TypeError):
+            counts["no_json"] += 1
+            continue
+        tools = body.get("tools") or []
+        messages = body.get("messages") or []
+        if not messages:
+            counts["no_messages"] += 1
+            continue
+        try:
+            hash_ids: dict[str, list[bytes]] = {}
+            base_tokens = 0
+            for v in variants:
+                tt = apply_variant(v, tools, patterns=patterns)
+                token_ids = render_to_tokens(tokenizer, messages, tt)
+                hash_ids[v] = sha256_chain_tokens(token_ids, block_size)
+                if v == "base":
+                    base_tokens = len(token_ids)
+        except Exception as e:  # noqa: BLE001
+            counts["render_error"] += 1
+            if not first_err:
+                first_err = f"{type(e).__name__}: {e}"
+            continue
+        records.append({
+            "request_id": str(i),
+            "ts": parse_ts(get_col(row, "timestamp")),
+            "input_length": base_tokens,
+            "hash_ids": hash_ids,
+        })
     counts["first_render_error"] = first_err
     return records, counts
 
@@ -184,8 +144,7 @@ def analyze_base(records: list[dict]) -> dict:
     """§1/§2/§3: base 变体顺序扫描 (reuse_time 需按 ts 时序)."""
     ordered = sorted(records, key=lambda r: (r["ts"] is None, r["ts"] if r["ts"] is not None else 0))
     seen: set[bytes] = set()
-    last_seen: dict[bytes, int] = {}
-    reuse_times: list[int] = []
+    tracker = ReuseTracker()
     lcps: list[int] = []
     hit = total = tokens = 0
     earliest = latest = None
@@ -200,20 +159,11 @@ def analyze_base(records: list[dict]) -> dict:
             lcps.append(0)
             continue
         total += len(keys)
-        lcp = 0
-        for k in keys:
-            if k in seen:
-                lcp += 1
-            else:
-                break
-        hit += lcp
-        lcps.append(lcp)
+        n = lcp(keys, seen)
+        hit += n
+        lcps.append(n)
         if ts is not None:
-            for k in keys:
-                prev = last_seen.get(k)
-                if prev is not None:
-                    reuse_times.append(ts - prev)
-                last_seen[k] = ts
+            tracker.add(keys, ts)
         seen.update(keys)
     reqs = len(records)
     span = (latest - earliest) if (earliest is not None and latest is not None) else None
@@ -225,17 +175,17 @@ def analyze_base(records: list[dict]) -> dict:
         "total_blocks": total,
         "unique_blocks": len(seen),
         "lcps": lcps,
-        "reuse_quantiles": _reuse_quantiles(reuse_times),
-        "reuse_cdf": _reuse_cdf_points(reuse_times),
+        "reuse_quantiles": reuse_quantiles(tracker.gaps),
+        "reuse_cdf": reuse_cdf_points(tracker.gaps),
     }
 
 
 def variant_metrics(records: list[dict], variant: str, chain_kwargs: dict) -> dict:
     """§4: 单变体 {理想命中率, chain数量, 请求占比最多chain的长度, 该chain请求占比}."""
-    root, n_req, n_blocks = _build_trie(records, variant)
+    root, n_req, n_blocks = build_trie(records, variant)
     if n_req == 0 or n_blocks == 0:
         return {"ideal_hit_rate": 0.0, "chain_count": 0, "top_chain_length": 0, "top_chain_coverage": 0.0}
-    hits = _count_trie_hits(root)
+    hits = count_trie_hits(root)
     forest = find_chain_forest(root, **chain_kwargs)
     chains = forest.get("chains", [])
     if chains:
@@ -254,7 +204,7 @@ def variant_metrics(records: list[dict], variant: str, chain_kwargs: dict) -> di
 
 def base_forest(records: list[dict], chain_kwargs: dict) -> tuple[dict, int]:
     """§5: base 变体 chain forest."""
-    root, n_req, _ = _build_trie(records, "base")
+    root, n_req, _ = build_trie(records, "base")
     if n_req == 0:
         return {"chains": []}, 0
     return find_chain_forest(root, **chain_kwargs), n_req

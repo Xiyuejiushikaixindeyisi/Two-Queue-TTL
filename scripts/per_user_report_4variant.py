@@ -32,13 +32,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from verify_chain_path_closure import TrieNode, trie_insert  # noqa: E402
-from multi_chain_finder import (  # noqa: E402
+from lib.chains import (  # noqa: E402
     DEFAULT_MAX_CHAINS,
     DEFAULT_MC_BRANCH_THRESHOLD,
     DEFAULT_MC_COVERAGE_THRESHOLD,
     DEFAULT_MIN_CHAIN_COVERAGE,
     DEFAULT_MIN_CHAIN_LENGTH,
+    build_trie,
+    count_trie_hits,
     find_chain_forest,
 )
 
@@ -94,35 +95,6 @@ def load_4variant_trace(csv_path: Path) -> dict[str, list[dict]]:
 # Per-variant metrics
 # ---------------------------------------------------------------------------
 
-def _build_trie(records: list[dict], variant: str) -> tuple[TrieNode, int, int]:
-    """Build a prefix trie for one variant's hash_ids."""
-    root = TrieNode()
-    total_requests = 0
-    total_blocks = 0
-    for r in records:
-        keys = r["hash_ids"].get(variant, [])
-        if not keys:
-            continue
-        trie_insert(root, keys, r["request_id"])
-        total_requests += 1
-        total_blocks += len(keys)
-    return root, total_requests, total_blocks
-
-
-def _count_trie_hits(node: TrieNode) -> int:
-    """Sum (count - 1) over all non-root nodes — total prefix-cache hits.
-
-    Reasoning: each non-root node represents a specific prefix position. If
-    `count` requests visited this prefix, the first visit is a miss (cold)
-    and the remaining `count - 1` are hits (warm).
-    """
-    hits = 0
-    for child in node.children.values():
-        hits += child.count - 1
-        hits += _count_trie_hits(child)
-    return hits
-
-
 def _summarize_chain_forest(forest: dict, total_requests: int) -> dict:
     """chain_count / chain_avg_length(blocks) / chain_coverage(请求占比).
 
@@ -151,7 +123,7 @@ def analyze_user_4variant(
     """Run analysis for all variants in one user's records."""
     out: dict[str, dict] = {}
     for v in variants:
-        root, n_req, n_blocks = _build_trie(records, v)
+        root, n_req, n_blocks = build_trie(records, v)
         if n_req == 0:
             out[v] = {
                 "requests": 0, "blocks": 0,
@@ -161,7 +133,7 @@ def analyze_user_4variant(
                 "chain_coverage": 0.0,
             }
             continue
-        hits = _count_trie_hits(root)
+        hits = count_trie_hits(root)
         forest = find_chain_forest(root, **chain_kwargs)
         out[v] = {
             "requests": n_req,

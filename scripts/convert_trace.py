@@ -40,12 +40,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.chain_key import sha256_chain_tokens  # noqa: E402
 
 # Raw prompts from 64K-context models can exceed the default field-size limit.
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — covers 64K tokens comfortably
@@ -59,25 +59,12 @@ _HASH_HEX_LEN = 16  # 64-bit collision space; matches the legacy CSV cell width
 
 
 def _sha256_chain(token_ids: list[int], block_size: int) -> list[str]:
-    """Chain SHA-256 over fixed-size token blocks, return hex-truncated keys.
+    """Chain SHA-256 over token blocks (lib.chain_key), hex-truncated for compact CSV cells.
 
-    Matches `lib.prompt_encoder.HFTokenEncoder.encode()` exactly:
-      K[0] = sha256("" || ",".join(str(t) for t in tokens[0:bs]))
-      K[i] = sha256(K[i-1] || ",".join(str(t) for t in tokens[i*bs:(i+1)*bs]))
-    Then hex-encode and truncate each to _HASH_HEX_LEN (16) chars to keep CSV
-    cells compact.
+    链本身用 full digest (lib.chain_key.sha256_chain_tokens, 与 HFTokenEncoder 一致),
+    仅在输出边界 hex-encode 并截断到 _HASH_HEX_LEN (16) 字符。
     """
-    out: list[str] = []
-    prev = b""
-    for i in range(0, len(token_ids), block_size):
-        block = token_ids[i:i + block_size]
-        payload = ",".join(str(t) for t in block).encode("utf-8")
-        h = hashlib.sha256()
-        h.update(prev)
-        h.update(payload)
-        prev = h.digest()
-        out.append(prev.hex()[:_HASH_HEX_LEN])
-    return out
+    return [k.hex()[:_HASH_HEX_LEN] for k in sha256_chain_tokens(token_ids, block_size)]
 
 
 # ---------------------------------------------------------------------------

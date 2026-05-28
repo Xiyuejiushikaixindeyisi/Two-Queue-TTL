@@ -4,6 +4,12 @@
 设计目标: 拿到一批新 CSV 数据时, 快速 sanity check ideal_hit_rate 数字,
 不跑完整 v2 pipeline (无 chain forest / 无 HTML / 无时序图).
 
+⚠ 刻意不迁移到 lib/: 本脚本是**故意保持 stdlib-only 的单文件可移植工具** —— 唯一价值是
+能直接 `scp` 到一台没装 transformers/没 clone repo 的裸机跑个字节级数字。因此它故意不 import
+lib.csv_trace / lib.hit_rate (那会让它依赖整个 repo)。它**不属于主线**: 正经现网分析 (token 级,
+与 vLLM 对齐) 用 `scripts/dataset_hit_rate.py`; 想要 byte 级也可以 `dataset_hit_rate.py --encoder byte`。
+所以这里的 CSV 解析 / LCP 与 lib/ 里有重复, 是经评估后接受的例外, 不是口径漂移。
+
 CSV 格式要求: 4 列 (request_id / user_id / raw_prompt / timestamp),
               支持中文列名 (请求ID / 租户ID / 请求参数) + UTF-8 BOM.
 

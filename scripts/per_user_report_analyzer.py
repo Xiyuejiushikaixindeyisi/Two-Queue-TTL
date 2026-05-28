@@ -48,21 +48,21 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 # Step 1.6: lib/ for PromptEncoder strategies
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from verify_chain_path_closure import (  # noqa: E402
+from lib.chains import (  # noqa: E402
+    DEFAULT_MAX_CHAINS,
+    DEFAULT_MC_BRANCH_THRESHOLD,
+    DEFAULT_MC_COVERAGE_THRESHOLD,
+    DEFAULT_MIN_CHAIN_COVERAGE,
+    DEFAULT_MIN_CHAIN_LENGTH,
     TrieNode,
-    discover_csv_files,
-    iter_raw_records,
-    split_blocks,
+    find_chain_forest,
     trie_insert,
 )
 from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
-from multi_chain_finder import (  # noqa: E402
-    DEFAULT_MC_BRANCH_THRESHOLD,
-    DEFAULT_MC_COVERAGE_THRESHOLD,
-    DEFAULT_MIN_CHAIN_LENGTH,
-    DEFAULT_MIN_CHAIN_COVERAGE,
-    DEFAULT_MAX_CHAINS,
-    find_chain_forest,
+from verify_chain_path_closure import (  # noqa: E402
+    discover_csv_files,
+    iter_raw_records,
+    split_blocks,
 )
 
 csv.field_size_limit(sys.maxsize)

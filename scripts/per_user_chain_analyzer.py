@@ -34,17 +34,16 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 # Step 1.6: lib/ provides PromptEncoder Protocol + Byte/GLM5 implementations
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.chains import TrieNode, trie_insert  # noqa: E402
+from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
 from verify_chain_path_closure import (  # noqa: E402
-    TrieNode,
     _canon_fieldnames,
     discover_csv_files,
     find_lcp,
     find_sample_request_at_depth,
     iter_raw_records,
     split_blocks,
-    trie_insert,
 )
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
 # Reuse Step 1.5 v2 metrics (spike detection + percentile)
 from per_user_report_analyzer import (  # noqa: E402
     DEFAULT_SPIKE_WINDOW_MIN,

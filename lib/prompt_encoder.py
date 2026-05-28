@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
+from lib.chain_key import sha256_chain_tokens
 from lib.hf_tokenizer import apply_template, load_kv_meta, load_tokenizer
 
 
@@ -115,19 +116,7 @@ class HFTokenEncoder:
     def encode_with_length(self, raw_prompt: str) -> tuple[list[bytes], int]:
         """Return (block keys, token count). Token count = len(rendered token_ids)."""
         token_ids = apply_template(self.tokenizer, raw_prompt, self.chat_mode)
-        keys: list[bytes] = []
-        prev = b""
-        for i in range(0, len(token_ids), self.block_size_tokens):
-            block = token_ids[i:i + self.block_size_tokens]
-            # sha256 fallback: prev || ",".join(str(t) for t in block).encode("utf-8")
-            # Hash algorithm need only be deterministic — see plan §6 decision.
-            payload = ",".join(str(t) for t in block).encode("utf-8")
-            h = hashlib.sha256()
-            h.update(prev)
-            h.update(payload)
-            prev = h.digest()
-            keys.append(prev)
-        return keys, len(token_ids)
+        return sha256_chain_tokens(token_ids, self.block_size_tokens), len(token_ids)
 
 
 class GLM5TokenEncoder(HFTokenEncoder):
