@@ -34,8 +34,24 @@ python3 -m venv .venv_glm5
 |---|---|---|---|---|
 | `models/glm5_tokenizer/` | `zai-org/GLM-5` | MLA (DSA) | 89,856 | `78 × (512+64) × 2` |
 | `models/qwen_v3_tokenizer/` | `Qwen/Qwen3-8B` | GQA | 147,456 | `2 × 36 × 8 × 128 × 2` |
+| `models/qwen_v35_tokenizer/` | Qwen-V3.5 | — | (待 vendor) | — |
+| `models/deepseek_v31_tokenizer/` | DeepSeek-V3.1 | MLA | (待 vendor) | — |
+| `models/deepseek_v4_tokenizer/` | DeepSeek-V4 | MLA | (待 vendor) | — |
 
-加新模型 (例 Qwen-V3.5): 见 `models/README.md` refresh procedure.
+分析代码与具体模型解耦: 只要 vendor 进 `models/<name>_tokenizer/`, 用
+`--encoder hf_token --tokenizer-path models/<name>_tokenizer` 即刻可跑, **无需改任何代码**.
+
+**加新模型 — 推荐 (有本地权重, 无网络)**: 模型权重目录 (如 `/mnt/esfs/DeepSeek-V3.1/`)
+本身带分词器小文件, 用脚本抽出来 (绝不复制权重) + 自动从 config.json 推导 `kv_meta.json`:
+
+```bash
+python3 scripts/vendor_tokenizer_from_weights.py \
+  --src /mnt/esfs/DeepSeek-V3.1 --name deepseek_v31 --verify   # 先 --dry-run 预览
+git add models/deepseek_v31_tokenizer/ && git commit -m "chore(models): vendor deepseek_v31"
+```
+
+命名约定 (全小写去点): Qwen-V3.5→`qwen_v35`, DeepSeek-V3.1→`deepseek_v31`, DeepSeek-V4→`deepseek_v4`.
+联网 `hf download` 的另一条路径、字段细节见 `models/README.md`.
 
 ## 数据集格式
 
