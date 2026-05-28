@@ -46,35 +46,58 @@ PYTHONPATH=. .venv_glm5/bin/python3 scripts/dataset_hit_rate.py \
 | 术语规范 (block / key / chain) | [`docs/terminology.md`](docs/terminology.md) |
 | 历史 spec / 路线图 / 算法决策矩阵 (已归档) | [`docs/archive/`](docs/archive/) |
 
+## 该用哪个脚本?
+
+| 我想… | 用 | 输入 |
+|---|---|---|
+| 一个文件夹里每个数据集的理想命中率对比 | `scripts/dataset_hit_rate.py` | 一堆 `.csv` |
+| 看单个 CSV 的全局 (模型级 4 块 HTML) | `scripts/model_report.py` | 单 CSV |
+| 深入单个 app (APP 级 5 块 HTML, 含 4 变体 + chain forest) | `scripts/app_report.py` | CSV+app-id 或 txt 文件夹 |
+
+这 3 个是**主线入口** (Step-1 现网分析)。其余脚本 (旧三阶段 funnel / per-user 7 节 pipeline /
+`sim/` 仿真) 属 **legacy / advanced**, 见下文与 [USAGE.md](USAGE.md) 的标注, 新人不必先看。
+
 ## 工具速查
 
-| 工具 | 文件 | 阶段 |
-|---|---|---|
-| **跨数据集理想命中率对比 (核心)** | `scripts/dataset_hit_rate.py` | 1 |
-| 模型级 HTML 报告 (模型/APP 指标 + reuse_time + LCP 分布) | `scripts/model_report.py` | 1 |
-| APP 级 HTML 报告 (CSV+app-id 或 txt; 含 4 变体 + chain forest) | `scripts/app_report.py` | 1 |
-| 跨数据集筛选 (按 user, hit_rate + GB/min) | `scripts/target_users_hit_rate.py` | 1 |
-| txt 树 → CSV 转换 | `scripts/txt_tree_to_csv.py` | 2 |
-| per-user pipeline (analyzer + HTML) | `scripts/v2_run_pipeline.py` | 2 + 3 |
-| model chains + 21 点阈值扫描 | `scripts/per_user_chain_analyzer.py` + `scripts/render_chains_html.py` | 3 |
+**主线 (Step-1 现网分析)**
 
-详细 CLI + 案例见 [USAGE.md](USAGE.md). 工具内部分工 (analyzer / renderer / chain finder) 见 [USAGE.md §工具速查表](USAGE.md).
+| 工具 | 文件 |
+|---|---|
+| **跨数据集理想命中率对比 (核心)** | `scripts/dataset_hit_rate.py` |
+| 模型级 HTML 报告 (模型/APP 指标 + reuse_time + LCP) | `scripts/model_report.py` |
+| APP 级 HTML 报告 (4 变体 + chain forest) | `scripts/app_report.py` |
+| raw prompt → token block 编码 | `lib/prompt_encoder.py` |
+| txt 树 → CSV 转换 | `scripts/txt_tree_to_csv.py` |
+| 从本地权重 vendor tokenizer | `scripts/vendor_tokenizer_from_weights.py` |
+
+**legacy / advanced** (旧主线, 仍可用, 但不在新人首选路径)
+
+| 工具 | 文件 |
+|---|---|
+| 跨数据集筛选 (按 user top-K) | `scripts/target_users_hit_rate.py` |
+| per-user 7 节 pipeline (analyzer + HTML) | `scripts/v2_run_pipeline.py` |
+| model chains + 21 点阈值扫描 | `scripts/per_user_chain_analyzer.py` + `scripts/render_chains_html.py` |
+| KV cache 淘汰仿真 (Step 2/3, out-of-scope) | `sim/` + `scripts/run_simulation.py` 等 |
+
+> `scripts/quick_hit_rate.py` 是**故意保持 stdlib-only 的单文件可移植工具** (能 `scp` 到裸机跑字节级数字),
+> 因此刻意不依赖 `lib/`、也不算主线。正经分析用上面 3 个主线入口 (token 级)。
+
+详细 CLI + 案例见 [USAGE.md](USAGE.md); key 体系/输入形态对照见 [docs/terminology.md §6.5](docs/terminology.md).
 
 ## 快速开始
 
 ```bash
 git clone <repo-url> && cd two_queue_ttl
 python3 -m venv .venv_glm5
-.venv_glm5/bin/pip install transformers tokenizers jinja2
+.venv_glm5/bin/pip install -r requirements.txt   # transformers>=4.45 + tokenizers + jinja2
 
-# 阶段 1: 跨数据集筛选 (auto-top-4 per dataset)
-PYTHONPATH=. .venv_glm5/bin/python3 scripts/target_users_hit_rate.py \
-  --dir data --models <m1>,<m2>,<m3> \
-  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user \
-  --csv-out outputs/screen.csv --md-out outputs/screen.md
+# 主线: 一个文件夹 → 每个数据集的理想命中率
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/dataset_hit_rate.py \
+  --dir /mnt/esfs/zhangxiyue/GLM-5/ \
+  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user
 ```
 
-完整命令 + 阶段 2/3 见 [USAGE.md](USAGE.md).
+完整命令 + 模型级/APP 级报告 + legacy 三阶段见 [USAGE.md](USAGE.md).
 
 ## 离线运行
 

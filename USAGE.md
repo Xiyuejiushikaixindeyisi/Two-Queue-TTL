@@ -8,16 +8,26 @@
 
 平台**完全离线** (air-gapped 友好), tokenizer 通过 git vendor, 不依赖任何 LLM 后端服务.
 
-## 3 阶段 funnel 总览
+## 主线入口 (现网分析, 先看这 3 个)
+
+| 我想… | 用 | 输入 | 章节 |
+|---|---|---|---|
+| 多个数据集的理想命中率对比 | `scripts/dataset_hit_rate.py` | 一堆 `.csv` 的文件夹 | [⚡](#-数据集级理想命中率-一条命令) |
+| 单 CSV 全局 (模型级 4 块 HTML) | `scripts/model_report.py` | 单 CSV | [📄 模型级](#-模型级-html-报告-单-csv-4-块) |
+| 深入单 app (APP 级 5 块 HTML) | `scripts/app_report.py` | CSV+app-id 或 txt 文件夹 | [📄 APP 级](#-app-级-html-报告-单-app-5-块) |
+
+key 体系/输入形态对照 (raw prompt vs converted vs simulation trace) 见 [docs/terminology.md §6.5](docs/terminology.md)。
+
+## 3 阶段 funnel 总览 (legacy / advanced)
+
+> 下面的「阶段 1/2/3」funnel 与 per-user 7 节 pipeline 是**旧主线**, 仍可用 (决策算法选型 / 深挖单
+> user 时), 但日常现网分析优先用上面的 3 个入口。新人可跳过本节。
 
 | 阶段 | 工具 | 输入 | 输出 | 用途 |
 |---|---|---|---|---|
 | **1. 筛选** | `scripts/target_users_hit_rate.py` | 多个 CSV 数据集 | terminal + CSV + MD long 表 | 选哪些 `(model, user)` 进阶段 3 |
 | **2. txt 直通** | `scripts/txt_tree_to_csv.py` + 阶段 3 工具 | txt 散文件 | HTML 报告 (部分指标缺) | 同事提供 txt 数据快速看 |
 | **3. 详细分析** | `scripts/v2_run_pipeline.py` + `scripts/per_user_chain_analyzer.py` + `scripts/render_chains_html.py` | `data/<model>/raw/*.csv` | per-user HTML + model HTML + 阈值扫描图 | 决策算法选型 |
-
-> 只想要「一个文件夹 → 每个数据集的理想命中率」一个数? 用下面的 `dataset_hit_rate.py`,
-> 不需要 `data/<model>/raw/` 嵌套, 直接指向任意放了一堆 `.csv` 的目录.
 
 ## ⚡ 数据集级理想命中率 (一条命令)
 
@@ -107,7 +117,8 @@ ls models/glm5_tokenizer/ models/qwen_v3_tokenizer/
 # 各应有: tokenizer.json + tokenizer_config.json (+ chat_template.jinja for GLM-5) + kv_meta.json
 
 python3 -m venv .venv_glm5
-.venv_glm5/bin/pip install transformers tokenizers jinja2
+.venv_glm5/bin/pip install -r requirements.txt   # 等价于 pip install -e '.[analysis]'
+# = transformers>=4.45 + tokenizers + jinja2 (token 级分析需要; 纯 byte 级/quick_hit_rate 无需任何依赖)
 # air-gapped 机器: git pull (tokenizer 已 vendor), pip 一次性在能联网机器做好
 ```
 
@@ -238,7 +249,7 @@ user 叫 `qwen3_app`, 用 Qwen3 tokenizer"。
 
 ---
 
-## 阶段 1: 跨数据集筛选
+## 阶段 1: 跨数据集筛选 (legacy / advanced)
 
 **目的**: 一次看 N 个数据集 × top-K user 的 hit_rate + GB/min, 选高研究价值场景.
 
@@ -309,7 +320,7 @@ PYTHONPATH=. .venv_glm5/bin/python3 scripts/target_users_hit_rate.py \
 
 ---
 
-## 阶段 2: txt 数据集直接进 HTML
+## 阶段 2: txt 数据集直接进 HTML (legacy / advanced)
 
 **目的**: 同事提供 txt 散文件 (无 timestamp), 跳过阶段 1 直接出 HTML.
 
@@ -382,7 +393,7 @@ PYTHONPATH=. .venv_glm5/bin/python3 scripts/v2_run_pipeline.py \
 
 ---
 
-## 阶段 3: 完整 HTML 详细分析
+## 阶段 3: 完整 HTML 详细分析 (legacy / advanced)
 
 **目的**: 阶段 1/2 选定的场景, 出**全套** HTML 做算法决策.
 

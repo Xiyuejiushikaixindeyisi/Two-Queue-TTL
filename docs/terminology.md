@@ -103,6 +103,23 @@ K[i] == other_K[i]  当且仅当  model_id 相同  且  hash_ids[:i+1] 完全相
 
 ---
 
+## 6.5 输入形态 → key 体系对照 (现网分析 vs 仿真)
+
+平台有两套 key 生成路径, **取决于输入数据的形态**。看到一个脚本/数据时, 先对号入座:
+
+| 输入形态 | 例子 | 用哪套 key | 怎么得到 block key | 谁用 |
+|---|---|---|---|---|
+| **raw prompt** | 生产 CSV 的 `请求参数`、txt 文本 | `lib.prompt_encoder` (`HFTokenEncoder.encode`) | tokenize 后**直接链化** `K[i]=sha256(K[i-1]‖block_tokens)` | `dataset_hit_rate` / `model_report` / `app_report` / `convert_trace` |
+| **converted trace** | `convert_trace --mode chat` 产出的 `hash_ids_*` 列 | 列里**已是**链化好的 hex key | `bytes.fromhex(hex)` 直接当 block key | `per_user_report_4variant`、`app_report` 的 CSV 内部 |
+| **simulation trace** | `sim/` 仿真用 trace 的 `hash_ids` (未链化的 block 内容 hash) | `sim.core.prefix_key` **再链化** | `K[i]=sha256(K[i-1]‖model_id‖hash_ids[i])` | `run_simulation` / `experiment_plan_ab` / … (Step 2/3, 已 out-of-scope) |
+
+关键区别: **raw prompt** 路径自己 tokenize + 链化 (现网分析主线, 见 [USAGE](../USAGE.md) ⚡/📄 章节);
+**simulation trace** 路径拿到的是别人算好的 *未链化* block 内容 hash, 必须用 `sim.core.prefix_key`
+按 §2 规则再链化才能当 cache key (直接用 `hash_ids[i]` 是错的, 见 §1)。两者最终都满足 §6 的
+「全链路 prefix-path hex」一致性。
+
+---
+
 ## 7. TwoQueueTTLPolicy — promotion_threshold 语义
 
 ### hit_count 的定义
