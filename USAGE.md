@@ -16,6 +16,40 @@
 | **2. txt 直通** | `scripts/txt_tree_to_csv.py` + 阶段 3 工具 | txt 散文件 | HTML 报告 (部分指标缺) | 同事提供 txt 数据快速看 |
 | **3. 详细分析** | `scripts/v2_run_pipeline.py` + `scripts/per_user_chain_analyzer.py` + `scripts/render_chains_html.py` | `data/<model>/raw/*.csv` | per-user HTML + model HTML + 阈值扫描图 | 决策算法选型 |
 
+> 只想要「一个文件夹 → 每个数据集的理想命中率」一个数? 用下面的 `dataset_hit_rate.py`,
+> 不需要 `data/<model>/raw/` 嵌套, 直接指向任意放了一堆 `.csv` 的目录.
+
+## ⚡ 数据集级理想命中率 (一条命令)
+
+平台最核心的「跨数据集理想 KV cache 命中率对比」入口. 给一个文件夹, 里面每个 `*.csv`
+当成一个数据集, 一条命令出每个数据集的 token 级理想命中率 (无淘汰上限, 与 vLLM 对齐).
+
+**形态 1 — 整库 pooled** (一个 CSV 一个数, 跨 app/用户的前缀复用都计入, 最贴近线上单实例 vLLM):
+
+```bash
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/dataset_hit_rate.py \
+  --dir /mnt/esfs/zhangxiyue/GLM-V5/ \
+  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user
+# 切 Qwen3: --encoder hf_token --tokenizer-path models/qwen_v3_tokenizer
+# 可选: --csv-out outputs/glm_v5_datasets.csv
+```
+
+**形态 2 — 指定 app-id** (每个数据集只统计该 app-id = 租户ID/user_id 的请求):
+
+```bash
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/dataset_hit_rate.py \
+  --dir /mnt/esfs/zhangxiyue/GLM-V5/ \
+  --app-id <租户ID值> \
+  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user
+# app-id 在别的列? 加 --app-col <列名>
+```
+
+输出: terminal 表 (每行一个数据集: `reqs / apps / total_blk / uniq_blk / hit_rate / GB/min / dur`),
+可选 `--csv-out`. 口径: `ideal_hit_rate = (total_blocks - unique_blocks) / total_blocks`;
+chain hash 是位置敏感前缀身份, 每个 block 第一次出现必 miss、之后必 hit → **与请求顺序无关**,
+不用按 timestamp 排序. 与 `target_users_hit_rate.py` 的区别: 后者按 user 选 top-K 且要
+`data/<model>/raw/` 布局; 本脚本是扁平文件夹 + 数据集级整库口径.
+
 ## 环境准备
 
 ```bash
@@ -438,7 +472,8 @@ outputs/GLM-V5-32K-0515/
 
 | 工具 | 文件 | 阶段 | 说明 |
 |---|---|---|---|
-| 跨数据集筛选 | `scripts/target_users_hit_rate.py` | 1 | auto-top-k 默认 N=4 |
+| 数据集级理想命中率 | `scripts/dataset_hit_rate.py` | 1 | 扁平文件夹 → 每 CSV 整库 pooled; `--app-id` 看单 app |
+| 跨数据集筛选 (按 user) | `scripts/target_users_hit_rate.py` | 1 | auto-top-k 默认 N=4; 需 `data/<model>/raw/` 布局 |
 | txt → CSV 转换 | `scripts/txt_tree_to_csv.py` | 2 | sequential rid 默认 |
 | per-user pipeline | `scripts/v2_run_pipeline.py` | 2 + 3 | 调 analyzer + renderer |
 | model chains analyzer | `scripts/per_user_chain_analyzer.py` | 3 | 出 JSON + 21 点 threshold sweep |
