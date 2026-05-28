@@ -60,6 +60,10 @@ class ByteLevelEncoder:
         self.block_size_bytes = block_size_bytes
 
     def encode(self, raw_prompt: str) -> list[bytes]:
+        return self.encode_with_length(raw_prompt)[0]
+
+    def encode_with_length(self, raw_prompt: str) -> tuple[list[bytes], int]:
+        """Return (block keys, length in encode units). Byte mode: length = #utf-8 bytes."""
         encoded = raw_prompt.encode("utf-8")
         keys: list[bytes] = []
         prev = b""
@@ -70,7 +74,7 @@ class ByteLevelEncoder:
             h.update(block)
             prev = h.digest()
             keys.append(prev)
-        return keys
+        return keys, len(encoded)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +110,10 @@ class HFTokenEncoder:
         )
 
     def encode(self, raw_prompt: str) -> list[bytes]:
+        return self.encode_with_length(raw_prompt)[0]
+
+    def encode_with_length(self, raw_prompt: str) -> tuple[list[bytes], int]:
+        """Return (block keys, token count). Token count = len(rendered token_ids)."""
         token_ids = apply_template(self.tokenizer, raw_prompt, self.chat_mode)
         keys: list[bytes] = []
         prev = b""
@@ -119,7 +127,7 @@ class HFTokenEncoder:
             h.update(payload)
             prev = h.digest()
             keys.append(prev)
-        return keys
+        return keys, len(token_ids)
 
 
 class GLM5TokenEncoder(HFTokenEncoder):
