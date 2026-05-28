@@ -51,6 +51,8 @@ PYTHONPATH=. .venv_glm5/bin/python3 scripts/dataset_hit_rate.py \
 | 工具 | 文件 | 阶段 |
 |---|---|---|
 | **跨数据集理想命中率对比 (核心)** | `scripts/dataset_hit_rate.py` | 1 |
+| 模型级 HTML 报告 (模型/APP 指标 + reuse_time + LCP 分布) | `scripts/model_report.py` | 1 |
+| APP 级 HTML 报告 (CSV+app-id 或 txt; 含 4 变体 + chain forest) | `scripts/app_report.py` | 1 |
 | 跨数据集筛选 (按 user, hit_rate + GB/min) | `scripts/target_users_hit_rate.py` | 1 |
 | txt 树 → CSV 转换 | `scripts/txt_tree_to_csv.py` | 2 |
 | per-user pipeline (analyzer + HTML) | `scripts/v2_run_pipeline.py` | 2 + 3 |

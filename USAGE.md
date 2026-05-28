@@ -50,6 +50,55 @@ chain hash 是位置敏感前缀身份, 每个 block 第一次出现必 miss、�
 不用按 timestamp 排序. 与 `target_users_hit_rate.py` 的区别: 后者按 user 选 top-K 且要
 `data/<model>/raw/` 布局; 本脚本是扁平文件夹 + 数据集级整库口径.
 
+## 📄 模型级 HTML 报告 (单 CSV, 4 块)
+
+`scripts/model_report.py`: 指定文件夹 + 一个 `.csv`, 出一个精简的模型级 HTML (单文件, 内联 SVG, 离线可看). 只含 4 块:
+
+1. **模型级指标**: 理想命中率 (整库 pooled) / 请求数量 / 平均长度 (token) / 请求时间跨度;
+2. **APP 级指标表**: 所有 app-id × {请求量, 占总请求量比例, 平均长度(token), 理想请求命中率(该 app **隔离** pooled)};
+3. **模型级 reuse time**: CDF 图 (log-x) + 表 P50/P80/P90/P95/MAX;
+4. **每个用户的 LCP distribution**: 每个 app-id 一张 LCP 直方图 (ToB 一般 ≤ 50 用户).
+
+```bash
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/model_report.py \
+  --dir /mnt/esfs/zhangxiyue/GLM-V5/ --csv GLM-V5-0514.csv \
+  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user \
+  --output outputs/GLM-V5-0514_model.html
+# --csv 也可直接给完整路径 (不带 --dir); app-id 在别的列加 --app-col <列名>; 切 Qwen3 同前
+```
+
+口径: 模型级命中率 = 整库 pooled; APP 级命中率 = 该 app 请求隔离 pooled, 其 LCP 列表即第 4 块的分布
+(第 2、4 块同源: `app_hit_rate = Σ(app LCP)/Σ(app blocks)`); `reuse_time` = 某 block 距上次访问的
+时间间隔, 模型级 pooled, 按 timestamp 时序计算 (与 hit_rate 不同, 依赖顺序). 平均长度 = 每请求
+`apply_chat_template` 后的 token 数取平均.
+
+## 📄 APP 级 HTML 报告 (单 app, 5 块)
+
+`scripts/app_report.py`: 一条命令吃**原始数据** + app-id, 内部完成 convert + 分析 + 渲染 (单文件 HTML). 5 块:
+
+1. **APP 指标**: 理想命中率 / 请求数量 / 平均长度 (token) / 请求时间跨度;
+2. **APP reuse time**: CDF 图 (log-x) + 表 P50/P80/P90/P95/MAX;
+3. **per-request LCP distribution**: 柱状图 + TOP10 表 (LCP 长度 + 覆盖率=该 LCP 值的请求占比);
+4. **4 变体对比** (行=指标 理想命中率/chain数量/请求占比最多chain的长度/该chain请求占比, 列=base/reorder/placeholder/both);
+5. **chain forest (base)**: base 变体显著 chain 列表 (长度/请求数/请求占比).
+
+输入两种 (第 4 块只有 CSV 有):
+
+```bash
+# A. 生产 CSV + app-id → 全部 5 块 (请求参数须是 {"tools":[...],"messages":[...]} JSON)
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/app_report.py \
+  --csv /mnt/esfs/zhangxiyue/GLM-V5/GLM-V5-0514.csv --app-id <租户ID> \
+  --tokenizer-path models/glm5_tokenizer --output outputs/app_<租户ID>.html
+
+# B. txt 文件夹 (纯 prompt 文本, 无 tools) → 整个文件夹 = 一个 app, **省略第 4 块**
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/app_report.py \
+  --txt-dir /mnt/esfs/zhangxiyue/qwen_txt/ \
+  --encoder hf_token --tokenizer-path models/qwen_v3_tokenizer --output outputs/app_qwen.html
+```
+
+口径同模型级报告: 命中率/LCP/chain 基于 base 变体 token block; reuse_time 按 ts 时序 (txt 无 ts → reuse
+块退化为空, 其余照出). chain 阈值用 `--mc-min-len / --mc-min-cov` 等调。CSV 模式必须 token 编码器。
+
 ## 环境准备
 
 ```bash
@@ -473,6 +522,8 @@ outputs/GLM-V5-32K-0515/
 | 工具 | 文件 | 阶段 | 说明 |
 |---|---|---|---|
 | 数据集级理想命中率 | `scripts/dataset_hit_rate.py` | 1 | 扁平文件夹 → 每 CSV 整库 pooled; `--app-id` 看单 app |
+| 模型级 HTML 报告 (4 块) | `scripts/model_report.py` | 1 | 单 CSV → 模型/APP 指标 + reuse_time CDF + 每用户 LCP 分布 |
+| APP 级 HTML 报告 (5 块) | `scripts/app_report.py` | 1 | CSV+app-id 或 txt 文件夹 → APP 指标 + reuse + LCP + 4变体 + chain forest |
 | 跨数据集筛选 (按 user) | `scripts/target_users_hit_rate.py` | 1 | auto-top-k 默认 N=4; 需 `data/<model>/raw/` 布局 |
 | txt → CSV 转换 | `scripts/txt_tree_to_csv.py` | 2 | sequential rid 默认 |
 | per-user pipeline | `scripts/v2_run_pipeline.py` | 2 + 3 | 调 analyzer + renderer |
