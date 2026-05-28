@@ -493,6 +493,32 @@ outputs/GLM-V5-32K-0515/
 
 阅读顺序建议: `per_user_chains.html` (看全局 + threshold sweep 选 branch_threshold) → `cross_user_summary.html` (看哪些 user 偏离基线) → `<uid>/user_report.html` (深入单 user).
 
+#### 精简报告 (推荐): model_report (模型级) + app_report (APP 级)
+
+只想要前述精简单文件 HTML (模型级 4 块 / APP 级 5 块) 时, 不必跑上面的完整 pipeline. 以真实数据集
+`/mnt/esfs/zhangxiyue/GLM-5/GLM-V5-32K-0514.csv` (glm5 tokenizer) 为例:
+
+```bash
+DS=/mnt/esfs/zhangxiyue/GLM-5/GLM-V5-32K-0514.csv
+
+# 1) 模型级报告 (4 块: 模型指标 + APP 表 + reuse_time CDF + 每用户 LCP 分布)
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/model_report.py \
+  --csv "$DS" \
+  --encoder glm5_token --tokenizer-path models/glm5_tokenizer --chat-mode wrap_user \
+  --output outputs/GLM-V5-32K-0514_model.html
+
+# 2) 从上一步的 APP 表挑一个高价值 app-id (或先 dataset_hit_rate --app-id 看),
+#    再出该 app 的 APP 级报告 (5 块: APP 指标 + reuse_time + LCP TOP10 + 4变体 + chain forest)
+PYTHONPATH=. .venv_glm5/bin/python3 scripts/app_report.py \
+  --csv "$DS" --app-id <租户ID> \
+  --tokenizer-path models/glm5_tokenizer \
+  --output outputs/GLM-V5-32K-0514_app_<租户ID>.html
+```
+
+产物: `outputs/GLM-V5-32K-0514_model.html` (模型级) + `outputs/GLM-V5-32K-0514_app_<租户ID>.html` (单 app),
+均为自带内联 SVG 的单文件 HTML, 离线直接打开. (app_report 默认 `--encoder glm5_token --chat-mode wrap_user`,
+故此处可省; CSV 模式必须给 `--app-id`.)
+
 ---
 
 ## 核心指标速查
