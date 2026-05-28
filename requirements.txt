@@ -1,0 +1,14 @@
+# Token-level analysis runtime (dataset_hit_rate / model_report / app_report /
+# convert_trace with --encoder glm5_token|hf_token).
+#
+# Offline / air-gapped 用法: 在能联网的机器上 `pip install -r requirements.txt`
+# 装进 venv, 然后该 venv 拷到离线机 (或离线机直接装一次)。tokenizer **文件** 走
+# git vendor (models/<name>_tokenizer/), 与这里的 Python **包** 是两回事。
+#
+# 仅做 byte-level (--encoder byte) 或 quick_hit_rate.py 时无需任何依赖 (纯标准库)。
+#
+# 等价于 pyproject 的 `analysis` extra: pip install -e '.[analysis]'
+
+transformers>=4.45   # apply_chat_template(tools=...) 需要; GLM-5 tokenizer 加载需要
+tokenizers           # transformers 硬依赖 (会自动带), 显式列出
+jinja2               # chat_template.jinja 渲染; transformers 不自动带, 必须显式装

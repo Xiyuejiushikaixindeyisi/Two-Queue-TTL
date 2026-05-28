@@ -7,9 +7,21 @@ name = "kv-cache-sim"
 version = "0.1.0"
 description = "Offline KV cache eviction simulation platform for prefix cache hit-rate analysis"
 requires-python = ">=3.9"
+# Base install is dependency-free: byte-level analysis (--encoder byte) and
+# quick_hit_rate.py use only the stdlib. Token-level analysis (the real,
+# vLLM-aligned path) needs the `analysis` extra below.
 dependencies = []
 
 [project.optional-dependencies]
+# Token-level analysis runtime (dataset_hit_rate / model_report / app_report /
+# convert_trace with --encoder glm5_token|hf_token). jinja2 is NOT pulled by
+# transformers, so it must be listed explicitly; transformers>=4.45 is required
+# for apply_chat_template(tools=...) — see docs/step1_6_token_level_experiment_plan.md.
+analysis = [
+    "transformers>=4.45",
+    "tokenizers",
+    "jinja2",
+]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
@@ -24,7 +36,9 @@ plot = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sim*"]
+# `lib` = in-scope Step-1 core (trace analysis). `sim` = Step-2/3 simulation,
+# kept for reference but out of the active scope (see docs/archive/).
+include = ["lib*", "sim*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -34,5 +48,5 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["sim"]
+source = ["lib", "sim"]
 omit = ["tests/*", "scripts/*"]
