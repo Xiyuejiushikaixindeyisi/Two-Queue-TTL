@@ -57,8 +57,9 @@ from lib.csv_trace import (  # noqa: E402
     parse_ts,
     resolve_app,
 )
+from lib.hf_tokenizer import apply_template  # noqa: E402
 from lib.hit_rate import lcp, lcp_histogram  # noqa: E402
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
+from lib.prompt_encoder import build_encoder_from_args, resolve_max_input_tokens  # noqa: E402
 from lib.prompt_rewrite import (  # noqa: E402
     DEFAULT_PATTERNS,
     VARIANTS,
@@ -75,9 +76,17 @@ from lib.svg_charts import svg_cdf_log_x, svg_histogram  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def build_records_from_csv(csv_path: Path, app_id: str, tokenizer, patterns,
-                           variants, block_size: int, app_col: str | None) -> tuple[list[dict], dict]:
+                           variants, block_size: int, app_col: str | None,
+                           max_input_tokens: int | None = None) -> tuple[list[dict], dict, dict]:
+    """Returns (records, counts, rid_to_tokens). rid_to_tokens: base token_ids per
+    request_id — kept so chain prefixes can be decoded back to text (§5).
+
+    max_input_tokens: base 渲染后 token 数超过它的请求整条丢弃 (模型放不下), 计入
+    counts['over_length']; 此时不再渲染其余 3 个变体 (省算力)。
+    """
     records: list[dict] = []
-    counts = {"matched": 0, "no_json": 0, "no_messages": 0, "render_error": 0}
+    rid_to_tokens: dict[str, list[int]] = {}
+    counts = {"matched": 0, "no_json": 0, "no_messages": 0, "render_error": 0, "over_length": 0}
     first_err = ""
     for i, row in enumerate(iter_rows(csv_path)):
         if resolve_app(row, app_col) != app_id:
@@ -98,42 +107,73 @@ def build_records_from_csv(csv_path: Path, app_id: str, tokenizer, patterns,
             counts["no_messages"] += 1
             continue
         try:
-            hash_ids: dict[str, list[bytes]] = {}
-            base_tokens = 0
+            # 先渲染 base 拿长度: 超长则整条丢弃, 不浪费算力渲染其余变体
+            base_token_ids = render_to_tokens(tokenizer, messages,
+                                              apply_variant("base", tools, patterns=patterns))
+            if max_input_tokens is not None and len(base_token_ids) > max_input_tokens:
+                counts["over_length"] += 1
+                continue
+            hash_ids: dict[str, list[bytes]] = {
+                "base": sha256_chain_tokens(base_token_ids, block_size)
+            }
             for v in variants:
+                if v == "base":
+                    continue
                 tt = apply_variant(v, tools, patterns=patterns)
                 token_ids = render_to_tokens(tokenizer, messages, tt)
                 hash_ids[v] = sha256_chain_tokens(token_ids, block_size)
-                if v == "base":
-                    base_tokens = len(token_ids)
         except Exception as e:  # noqa: BLE001
             counts["render_error"] += 1
             if not first_err:
                 first_err = f"{type(e).__name__}: {e}"
             continue
+        rid = str(i)
         records.append({
-            "request_id": str(i),
+            "request_id": rid,
             "ts": parse_ts(get_col(row, "timestamp")),
-            "input_length": base_tokens,
+            "input_length": len(base_token_ids),
             "hash_ids": hash_ids,
         })
+        rid_to_tokens[rid] = base_token_ids
     counts["first_render_error"] = first_err
-    return records, counts
+    return records, counts, rid_to_tokens
 
 
-def build_records_from_txt(txt_dir: Path, encoder, block_size: int) -> list[dict]:
-    """整个文件夹视作一个 app; 每个 .txt 一条请求 (base 变体 only, 无 tools)。"""
+def build_records_from_txt(txt_dir: Path, encoder, block_size: int,
+                           max_input_tokens: int | None = None) -> tuple[list[dict], dict, int]:
+    """整个文件夹视作一个 app; 每个 .txt 一条请求 (base 变体 only, 无 tools)。
+
+    Returns (records, rid_to_tokens, skipped_over_length). token 编码器下保留 token_ids 以便
+    解码 chain 前缀; byte 编码器无 token_ids → rid_to_tokens 为空, §5 不解码。
+    超过 max_input_tokens 的请求整条丢弃。
+    """
     records: list[dict] = []
+    rid_to_tokens: dict[str, list[int]] = {}
+    skipped_over_length = 0
+    tok = getattr(encoder, "tokenizer", None)
     for i, txt in enumerate(sorted(txt_dir.rglob("*.txt"))):
         prompt = txt.read_text(encoding="utf-8", errors="replace")
-        keys, ntok = encoder.encode_with_length(prompt)
+        rid = str(i)
+        if tok is not None:
+            token_ids = apply_template(tok, prompt, encoder.chat_mode)
+            ntok = len(token_ids)
+            if max_input_tokens is not None and ntok > max_input_tokens:
+                skipped_over_length += 1
+                continue
+            keys = sha256_chain_tokens(token_ids, block_size)
+            rid_to_tokens[rid] = token_ids
+        else:
+            keys, ntok = encoder.encode_with_length(prompt)
+            if max_input_tokens is not None and ntok > max_input_tokens:
+                skipped_over_length += 1
+                continue
         records.append({
-            "request_id": str(i),
+            "request_id": rid,
             "ts": None,                       # txt 无 timestamp → reuse_time 退化
             "input_length": ntok,
             "hash_ids": {"base": keys},
         })
-    return records
+    return records, rid_to_tokens, skipped_over_length
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +250,28 @@ def base_forest(records: list[dict], chain_kwargs: dict) -> tuple[dict, int]:
     return find_chain_forest(root, **chain_kwargs), n_req
 
 
+def decode_chain_prefixes(forest: dict, rid_to_tokens: dict, tokenizer,
+                          block_size: int, max_blocks: int | None = None) -> dict:
+    """解码每条 base chain 的共享前缀 (system prompt): 取样本请求, decode 前 N 个 block。
+
+    Returns {chain_id: {"text": str, "blocks": n, "truncated": bool}}。chain 内所有请求
+    该前缀 block 哈希一致 → 任一样本解出的内容唯一, 非近似。tokenizer=None (byte 模式) 返回空。
+    """
+    out: dict[int, dict] = {}
+    if tokenizer is None:
+        return out
+    for c in forest.get("chains", []):
+        rid = c.get("sample_request_id")
+        toks = rid_to_tokens.get(rid) if rid is not None else None
+        if not toks:
+            continue
+        clen = c["chain_length"]
+        nblocks = clen if max_blocks is None else min(clen, max_blocks)
+        text = tokenizer.decode(toks[:nblocks * block_size])
+        out[c["chain_id"]] = {"text": text, "blocks": nblocks, "truncated": nblocks < clen}
+    return out
+
+
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------
@@ -229,6 +291,10 @@ th{background:#edf2f7;color:#2d3748;} td.l,th.l{text-align:left;}
 tr:nth-child(even) td{background:#f9fafb;}
 .q-table,.v-table{width:auto;} .q-table td,.q-table th,.v-table td,.v-table th{text-align:center;padding:6px 14px;}
 .note{color:#a0aec0;font-size:11px;margin-top:6px;}
+details.chain{margin:6px 0;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;}
+details.chain summary{cursor:pointer;font-size:12px;color:#2d3748;}
+details.chain pre{white-space:pre-wrap;word-break:break-all;font-size:11px;color:#2d3748;
+  background:#f7fafc;border-radius:4px;padding:8px;margin:6px 0 0;max-height:360px;overflow:auto;}
 """
 
 
@@ -298,36 +364,57 @@ def section_4variant(per_variant: dict, variants: list[str]) -> str:
             'placeholder 是占位符近似上界, 真实收益需真机 A/B。</div>')
 
 
-def section_forest(forest: dict, n_req: int) -> str:
+def section_forest(forest: dict, n_req: int, decoded: dict | None = None) -> str:
     chains = forest.get("chains", [])
     if not chains:
         return '<h2>5. chain forest (base)</h2><div class="note">无显著 chain。</div>'
+    decoded = decoded or {}
     rows = ""
     for c in chains:
         share = (c["coverage_count"] / n_req * 100) if n_req else 0.0
         rows += (f'<tr><td>{c["chain_id"]}</td><td>{c["chain_length"]:,}</td>'
                  f'<td>{c["coverage_count"]:,}</td><td>{share:.2f}%</td>'
                  f'<td>{c.get("max_prefix_coverage_pct", 0):.1f}%</td></tr>')
-    return (f'<h2>5. chain forest (base)</h2>'
-            '<table><tr><th>chain_id</th><th>长度 (blocks)</th><th>请求数</th>'
-            f'<th>请求占比</th><th>max 前缀覆盖</th></tr>{rows}</table>'
-            '<div class="note">base 变体的显著共享前缀链 (≥ 阈值)。请求占比 = 完整走完该 chain 的请求 / APP 总请求。</div>')
+    table = ('<table><tr><th>chain_id</th><th>长度 (blocks)</th><th>请求数</th>'
+             f'<th>请求占比</th><th>max 前缀覆盖</th></tr>{rows}</table>')
+
+    details = ""
+    for c in chains:
+        d = decoded.get(c["chain_id"])
+        if not d:
+            continue
+        trunc = f', 截断到前 {d["blocks"]} blocks' if d["truncated"] else ""
+        details += (
+            f'<details class="chain"><summary>chain {c["chain_id"]} 原始内容 '
+            f'(system prompt; {c["chain_length"]} blocks{trunc})</summary>'
+            f'<pre>{html.escape(d["text"])}</pre></details>'
+        )
+    decode_note = (
+        '<div class="note">「原始内容」= 该 chain 共享前缀解码所得 (system prompt + tools);'
+        ' 取一条样本请求解码, chain 内所有请求该前缀 block 哈希一致 → 内容唯一。'
+        '⚠ 含真实 prompt 文本, 该报告即为敏感文件。</div>' if details else ""
+    )
+    return (f'<h2>5. chain forest (base)</h2>{table}'
+            '<div class="note">base 变体的显著共享前缀链 (≥ 阈值)。请求占比 = 完整走完该 chain 的请求 / APP 总请求。</div>'
+            f'{details}{decode_note}')
 
 
 def build_html(app_id: str, b: dict, meta: dict, len_unit: str,
-               per_variant: dict | None, forest: dict, n_req: int, source: str) -> str:
+               per_variant: dict | None, forest: dict, n_req: int, source: str,
+               decoded: dict | None = None, n_over_length: int = 0) -> str:
     sections = [section_metrics(b, len_unit), section_reuse(b), section_lcp(b)]
     if per_variant is not None:
         sections.append(section_4variant(per_variant, list(per_variant.keys())))
-    sections.append(section_forest(forest, n_req))
+    sections.append(section_forest(forest, n_req, decoded))
     body = "\n".join(sections)
+    over_note = f"· 已丢弃超长请求 {n_over_length:,} 条 (超 tokenizer 上限) " if n_over_length else ""
     return f"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <title>APP report — {html.escape(app_id)}</title><style>{_CSS}</style></head><body>
 <h1>APP 级理想 KV cache 分析 — {html.escape(app_id)}</h1>
 <div class="sub">source: <code>{html.escape(source)}</code> · encoder: <code>{html.escape(meta['name'])}</code>
  · block_size={meta['block_size']} {meta['block_unit']} · 唯一 block {b['unique_blocks']:,} / 总 block {b['total_blocks']:,}
- {'· 无 tools → 省略 4 变体块' if per_variant is None else ''}</div>
+ {over_note}{'· 无 tools → 省略 4 变体块' if per_variant is None else ''}</div>
 {body}
 </body></html>"""
 
@@ -356,6 +443,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mc-min-len", type=int, default=DEFAULT_MIN_CHAIN_LENGTH)
     p.add_argument("--mc-min-cov", type=float, default=DEFAULT_MIN_CHAIN_COVERAGE)
     p.add_argument("--mc-max-chains", type=int, default=DEFAULT_MAX_CHAINS)
+    p.add_argument("--no-decode", action="store_true",
+                   help="§5 不解码 chain 原始内容 (默认解码; 解码后报告含真实 prompt 文本)")
+    p.add_argument("--max-decoded-blocks", type=int, default=None,
+                   help="§5 每条 chain 最多解码前 N 个 block (默认 None = 整条链)")
+    p.add_argument("--max-input-tokens", type=int, default=None,
+                   help="超过此 token 数的请求整条丢弃 (默认自动取 tokenizer.model_max_length)")
+    p.add_argument("--no-length-filter", action="store_true",
+                   help="关闭超长过滤 (默认开: 用 tokenizer 上限)")
     args = p.parse_args(argv)
 
     chain_kwargs = {
@@ -366,8 +461,11 @@ def main(argv: list[str] | None = None) -> int:
     encoder, meta = build_encoder_from_args(args)
     len_unit = "tokens" if meta["block_unit"] == "tokens" else "bytes"
     patterns = load_patterns_config(args.patterns) if args.patterns else DEFAULT_PATTERNS
+    max_tokens = resolve_max_input_tokens(encoder, args.max_input_tokens, args.no_length_filter)
 
     per_variant: dict | None = None
+    rid_to_tokens: dict = {}
+    n_over_length = 0
     if args.csv:
         if not args.app_id:
             print("error: CSV 模式必须给 --app-id", file=sys.stderr)
@@ -382,11 +480,13 @@ def main(argv: list[str] | None = None) -> int:
         app_id = args.app_id
         source = str(csv_path)
         print(f"分析 CSV {csv_path}  app-id={app_id} ...")
-        records, counts = build_records_from_csv(
-            csv_path, app_id, encoder.tokenizer, patterns, VARIANTS, args.block_size, args.app_col)
+        records, counts, rid_to_tokens = build_records_from_csv(
+            csv_path, app_id, encoder.tokenizer, patterns, VARIANTS, args.block_size,
+            args.app_col, max_input_tokens=max_tokens)
+        n_over_length = counts["over_length"]
         print(f"  matched {counts['matched']:,} 行; 成功 {len(records):,}; "
               f"skip no-json {counts['no_json']:,} / no-msg {counts['no_messages']:,} / "
-              f"render-err {counts['render_error']:,}")
+              f"render-err {counts['render_error']:,} / 超长 {counts['over_length']:,}")
         if counts["first_render_error"]:
             print(f"  first render error: {counts['first_render_error'][:200]}")
         if not records:
@@ -401,21 +501,29 @@ def main(argv: list[str] | None = None) -> int:
         app_id = args.app_id or txt_dir.name
         source = str(txt_dir)
         print(f"分析 txt {txt_dir}  (整个文件夹 = app {app_id}) ...")
-        records = build_records_from_txt(txt_dir, encoder, args.block_size)
-        print(f"  {len(records):,} 个 txt 请求 (无 tools → 省略 4 变体块)")
+        records, rid_to_tokens, n_over_length = build_records_from_txt(
+            txt_dir, encoder, args.block_size, max_input_tokens=max_tokens)
+        print(f"  {len(records):,} 个 txt 请求 (无 tools → 省略 4 变体块)"
+              + (f"; 丢弃超长 {n_over_length:,}" if n_over_length else ""))
         if not records:
             print("error: 文件夹里没有 .txt", file=sys.stderr)
             return 1
 
     b = analyze_base(records)
     forest, n_req = base_forest(records, chain_kwargs)
+    decoded = {} if args.no_decode else decode_chain_prefixes(
+        forest, rid_to_tokens, getattr(encoder, "tokenizer", None),
+        args.block_size, args.max_decoded_blocks)
     print(f"  hit_rate={b['ideal_hit_rate']:.4f}, reqs={b['reqs']:,}, "
-          f"reuse样本={b['reuse_quantiles']['count']:,}, chains={len(forest.get('chains', []))}")
+          f"reuse样本={b['reuse_quantiles']['count']:,}, chains={len(forest.get('chains', []))}, "
+          f"decoded={len(decoded)}")
 
     out = args.output or Path(f"{app_id}_app_report.html")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build_html(app_id, b, meta, len_unit, per_variant, forest, n_req, source),
-                   encoding="utf-8")
+    out.write_text(
+        build_html(app_id, b, meta, len_unit, per_variant, forest, n_req, source,
+                   decoded, n_over_length),
+        encoding="utf-8")
     print(f"HTML → {out}")
     return 0
 

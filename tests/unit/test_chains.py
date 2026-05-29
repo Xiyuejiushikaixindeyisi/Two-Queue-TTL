@@ -47,6 +47,8 @@ def test_find_chain_forest_detects_shared_prefix():
     assert forest["chains"]
     top = max(forest["chains"], key=lambda c: c["coverage_count"])
     assert top["chain_length"] >= 4
+    # sample_request_id identifies a request that fully traverses the chain
+    assert top["sample_request_id"] in {"r0", "r1", "r2"}
 
 
 def test_find_chain_forest_empty_trie():

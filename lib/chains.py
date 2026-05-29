@@ -106,6 +106,9 @@ def _multi_chain_recursive(
             "keys":   list(path_keys),
             "counts": list(path_counts),
             "first_branch_position": first_branch_pos,
+            # leaf node's sample request — fully traverses this chain. Used to
+            # decode the chain's shared-prefix content (system prompt).
+            "sample_request_id": node.sample_request_id,
         }]
 
     next_first_branch = first_branch_pos
@@ -225,6 +228,7 @@ def find_chain_forest(
             "branch_at_root_position": bp,
             "branch_at_root_ratio":
                 _branch_ratio(c["counts"], bp, total) if bp is not None else None,
+            "sample_request_id": c.get("sample_request_id"),
             "keys":   [k.hex() for k in c["keys"]],
             "counts": c["counts"],
         })
