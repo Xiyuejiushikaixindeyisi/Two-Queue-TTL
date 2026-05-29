@@ -553,6 +553,9 @@ PYTHONPATH=. .venv_glm5/bin/python3 scripts/app_report.py \
 4. **chat_mode 差异**: GLM-5 wrap_user 5 tokens (含 `<think>`), Qwen3 8 tokens (无 `<think>`). 影响 block 0 但不影响 hit_rate 算法.
 5. **`<placeholder>` 是占位符**: CLI 示例的 `<model_dir>` / `<txt-root-path>` 要替换成实际值.
 6. **GLM-5 是 MLA 架构**: 不是标准 GQA, KV bytes/token 公式不同 (89,856 vs 标准几 MB), 已 vendor 在 `kv_meta.json` 透明标注.
+7. **超长请求默认被丢弃**: dataset_hit_rate / model_report / app_report / convert_trace 默认把 token 数超过
+   `tokenizer.model_max_length` (GLM-5=202752, Qwen3=131072) 的请求**整条丢弃** (模型放不下, 非真实可服务请求),
+   终端 + HTML 报告丢弃条数。`--max-input-tokens N` 改阈值, `--no-length-filter` 关闭。
 
 ## 工具速查表
 

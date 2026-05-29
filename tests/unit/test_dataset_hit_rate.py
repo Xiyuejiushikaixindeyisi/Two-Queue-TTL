@@ -28,6 +28,10 @@ class FakeEncoder:
             keys.append(acc.encode())
         return keys
 
+    def encode_with_length(self, prompt: str):
+        # token count = number of words (so over-length filter is testable)
+        return self.encode(prompt), len(prompt.split())
+
 
 def _write_csv(path: Path, rows: list[dict], header: list[str]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -142,6 +146,29 @@ def test_chinese_aliases_and_app_col(tmp_path):
     s = analyze_dataset(csv_path, FakeEncoder(), block_size=1, app_id="tenantA")
     assert s["reqs"] == 1
     assert s["total_blocks"] == 2
+
+
+def test_over_length_requests_dropped(tmp_path):
+    p = tmp_path / "d.csv"
+    _write_csv(p, [
+        {"request_id": "1", "user_id": "a", "raw_prompt": "x y z", "timestamp": "0"},        # 3 tok
+        {"request_id": "2", "user_id": "a", "raw_prompt": "a b c d e f g", "timestamp": "1"},  # 7 > 4
+        {"request_id": "3", "user_id": "a", "raw_prompt": "x y z", "timestamp": "2"},        # 3 tok
+    ], HEADER)
+    s = analyze_dataset(p, FakeEncoder(), block_size=1, max_input_tokens=4)
+    assert s["skipped_over_length"] == 1
+    assert s["reqs"] == 2                  # over-length row excluded from reqs
+    assert s["total_blocks"] == 6          # only the two 3-block requests
+    assert s["unique_blocks"] == 3
+
+
+def test_no_filter_keeps_all(tmp_path):
+    p = tmp_path / "d.csv"
+    _write_csv(p, [
+        {"request_id": "1", "user_id": "a", "raw_prompt": "a b c d e", "timestamp": "0"},
+    ], HEADER)
+    s = analyze_dataset(p, FakeEncoder(), block_size=1, max_input_tokens=None)
+    assert s["skipped_over_length"] == 0 and s["reqs"] == 1
 
 
 def test_discover_csvs_dir_and_dedupe(tmp_path):

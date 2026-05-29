@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.csv_trace import get_col, iter_rows, parse_ts, resolve_app  # noqa: E402
 from lib.hit_rate import lcp, lcp_histogram  # noqa: E402
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
+from lib.prompt_encoder import build_encoder_from_args, resolve_max_input_tokens  # noqa: E402
 from lib.reuse_time import (  # noqa: E402
     ReuseTracker,
     fmt_duration,
@@ -43,8 +43,12 @@ from lib.reuse_time import (  # noqa: E402
 from lib.svg_charts import svg_cdf_log_x, svg_histogram  # noqa: E402
 
 
-def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> dict:
-    """单 CSV → 模型级 + 每 app 指标 + 模型级 reuse_time. 单遍 (每 prompt 只编码一次)."""
+def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None,
+                      max_input_tokens: int | None = None) -> dict:
+    """单 CSV → 模型级 + 每 app 指标 + 模型级 reuse_time. 单遍 (每 prompt 只编码一次).
+
+    max_input_tokens: 超过此 token 数的请求整条丢弃 (计入 skipped_over_length, 不计入任何指标)。
+    """
     records: list[tuple[str, int | None, str]] = []
     for row in iter_rows(csv_path):
         app = resolve_app(row, app_col)
@@ -58,6 +62,7 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
     model_seen: set[bytes] = set()
     tracker = ReuseTracker()
     m_hit = m_blocks = m_tokens = m_reqs = 0
+    skipped_over_length = 0
     earliest: int | None = None
     latest: int | None = None
 
@@ -69,6 +74,14 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
         })
 
     for app, ts, prompt in records:
+        keys: list[bytes] = []
+        ntok = 0
+        if prompt:
+            keys, ntok = encoder.encode_with_length(prompt)
+            if max_input_tokens is not None and ntok > max_input_tokens:
+                skipped_over_length += 1
+                continue  # 整条丢弃: 不计入任何指标
+
         m_reqs += 1
         a = _app(app)
         a["reqs"] += 1
@@ -81,7 +94,6 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
             a["lcps"].append(0)
             continue
 
-        keys, ntok = encoder.encode_with_length(prompt)
         m_tokens += ntok
         m_blocks += len(keys)
         a["tokens"] += ntok
@@ -123,6 +135,7 @@ def analyze_model_csv(csv_path: Path, encoder, app_col: str | None = None) -> di
             "total_blocks": m_blocks,
             "unique_blocks": len(model_seen),
             "n_apps": len(apps),
+            "skipped_over_length": skipped_over_length,
         },
         "reuse_quantiles": reuse_quantiles(tracker.gaps),
         "reuse_cdf": reuse_cdf_points(tracker.gaps),
@@ -212,7 +225,8 @@ def build_html(stats: dict, meta: dict, csv_name: str, len_unit: str) -> str:
 <h1>模型级理想 KV cache 分析 — {html.escape(csv_name)}</h1>
 <div class="sub">encoder: <code>{html.escape(meta['name'])}</code> · block_size={meta['block_size']} {meta['block_unit']}
  · chat_mode={html.escape(str(meta.get('chat_mode')))} · tokenizer=<code>{html.escape(str(meta.get('tokenizer_path')))}</code>
- · 唯一 block {m['unique_blocks']:,} / 总 block {m['total_blocks']:,}</div>
+ · 唯一 block {m['unique_blocks']:,} / 总 block {m['total_blocks']:,}
+ {f"· 已丢弃超长请求 {m['skipped_over_length']:,} 条 (超 tokenizer 上限)" if m.get('skipped_over_length') else ''}</div>
 
 <h2>1. 模型级指标</h2>
 <div class="cards">{cards}</div>
@@ -245,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"])
     p.add_argument("--block-size", type=int, default=128)
+    p.add_argument("--max-input-tokens", type=int, default=None,
+                   help="超过此 token 数的请求整条丢弃 (默认自动取 tokenizer.model_max_length)")
+    p.add_argument("--no-length-filter", action="store_true",
+                   help="关闭超长过滤 (默认开: 用 tokenizer 上限)")
     args = p.parse_args(argv)
 
     csv_path = (args.dir / args.csv) if args.dir else Path(args.csv)
@@ -254,12 +272,16 @@ def main(argv: list[str] | None = None) -> int:
 
     encoder, meta = build_encoder_from_args(args)
     len_unit = "tokens" if meta["block_unit"] == "tokens" else "bytes"
-    print(f"Encoder: {meta['name']} ({meta['block_unit']}, chat_mode={meta['chat_mode']})")
+    max_tokens = resolve_max_input_tokens(encoder, args.max_input_tokens, args.no_length_filter)
+    print(f"Encoder: {meta['name']} ({meta['block_unit']}, chat_mode={meta['chat_mode']}); "
+          f"max_input_tokens={max_tokens if max_tokens is not None else '不过滤'}")
     print(f"分析 {csv_path} ...")
-    stats = analyze_model_csv(csv_path, encoder, app_col=args.app_col)
+    stats = analyze_model_csv(csv_path, encoder, app_col=args.app_col, max_input_tokens=max_tokens)
     m = stats["model"]
+    over = m["skipped_over_length"]
     print(f"  {m['reqs']:,} reqs, {m['n_apps']} apps, hit_rate={m['ideal_hit_rate']:.4f}, "
-          f"reuse样本={stats['reuse_quantiles']['count']:,}")
+          f"reuse样本={stats['reuse_quantiles']['count']:,}"
+          + (f", 丢弃超长 {over:,}" if over else ""))
 
     out = args.output or Path(f"{csv_path.stem}_model_report.html")
     out.parent.mkdir(parents=True, exist_ok=True)

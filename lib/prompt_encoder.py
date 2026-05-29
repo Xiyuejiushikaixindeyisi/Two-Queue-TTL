@@ -143,6 +143,27 @@ class GLM5TokenEncoder(HFTokenEncoder):
 # Used by scripts/per_user_chain_analyzer.py and scripts/per_user_report_analyzer.py.
 # ---------------------------------------------------------------------------
 
+_SANE_MAX_TOKENS = 10_000_000  # above this, model_max_length is the HF "no limit" sentinel
+
+
+def resolve_max_input_tokens(encoder, explicit: int | None = None,
+                             disable: bool = False) -> int | None:
+    """决定输入 token 上限: 超过它的请求应被调用方跳过 (模型放不下, 非真实可服务请求)。
+
+    - disable=True → None (不过滤)
+    - explicit 给了 → explicit (CLI --max-input-tokens 覆盖)
+    - 否则取 tokenizer.model_max_length (合理值 0<x<1e7; GLM-5=202752, Qwen3=131072);
+      byte 编码器无 tokenizer 或值是 HF 的超大 sentinel → None (不过滤)
+    """
+    if disable:
+        return None
+    if explicit is not None:
+        return explicit
+    mml = getattr(getattr(encoder, "tokenizer", None), "model_max_length", None)
+    if isinstance(mml, int) and 0 < mml < _SANE_MAX_TOKENS:
+        return mml
+    return None
+
 
 def build_encoder_from_args(args) -> tuple[PromptEncoder, dict]:
     """Read --encoder / --tokenizer-path / --chat-mode / --block-size from args.

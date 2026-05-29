@@ -67,6 +67,18 @@ def _sha256_chain(token_ids: list[int], block_size: int) -> list[str]:
     return [k.hex()[:_HASH_HEX_LEN] for k in sha256_chain_tokens(token_ids, block_size)]
 
 
+def _resolve_max_tokens(args, tokenizer):
+    """超长过滤上限: 默认自动取 tokenizer.model_max_length; --max-input-tokens 覆盖; --no-length-filter 关。"""
+    from types import SimpleNamespace
+
+    from lib.prompt_encoder import resolve_max_input_tokens
+    return resolve_max_input_tokens(
+        SimpleNamespace(tokenizer=tokenizer),
+        getattr(args, "max_input_tokens", None),
+        getattr(args, "no_length_filter", False),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Column-name aliases (raw mode)
 # ---------------------------------------------------------------------------
@@ -136,6 +148,8 @@ def _print_dry_preview(records: list[dict], hash_cols: list[str]) -> None:
 def run_raw_mode(args, tokenizer) -> None:
     from lib.hf_tokenizer import apply_template
 
+    max_tokens = _resolve_max_tokens(args, tokenizer)
+
     with open(args.input, newline="", encoding="utf-8-sig") as fin:
         reader = csv.DictReader(fin)
         raw_rows = list(reader)
@@ -147,6 +161,7 @@ def run_raw_mode(args, tokenizer) -> None:
     rows = [_normalize_raw_row(_normalize_header_keys(r)) for r in raw_rows]
     out_records: list[dict] = []
     skipped_empty = 0
+    skipped_over_length = 0
 
     for i, row in enumerate(rows, 1):
         prompt = row.get("raw_prompt", "") or ""
@@ -157,6 +172,9 @@ def run_raw_mode(args, tokenizer) -> None:
         token_ids = apply_template(tokenizer, prompt, args.chat_mode)
         if not token_ids:
             skipped_empty += 1
+            continue
+        if max_tokens is not None and len(token_ids) > max_tokens:
+            skipped_over_length += 1
             continue
 
         hash_ids = _sha256_chain(token_ids, args.block_size)
@@ -172,7 +190,8 @@ def run_raw_mode(args, tokenizer) -> None:
         if i % 1000 == 0:
             print(f"  processed {i:,}/{len(rows):,} rows ...", flush=True)
 
-    print(f"Converted: {len(out_records):,} rows; skipped empty: {skipped_empty:,}")
+    print(f"Converted: {len(out_records):,} rows; skipped empty: {skipped_empty:,}; "
+          f"skipped over-length: {skipped_over_length:,}")
 
     cols = ["timestamp", "model_id", "user_id", "request_type",
             "input_length", "hash_ids"]
@@ -218,10 +237,12 @@ def run_chat_mode(args, tokenizer) -> None:
         print("Input is empty.")
         return
 
+    max_tokens = _resolve_max_tokens(args, tokenizer)
     out_records: list[dict] = []
     skipped_no_json = 0
     skipped_no_messages = 0
     skipped_render_error = 0
+    skipped_over_length = 0
     first_render_error: str = ""
 
     for i, raw_row in enumerate(raw_rows, 1):
@@ -252,14 +273,20 @@ def run_chat_mode(args, tokenizer) -> None:
         # Render all variants; if any one of them fails, skip the whole row
         # (we need consistent 4-column output, not a partial row).
         try:
-            base_token_count = 0
+            # 先渲染 base 拿长度: 超长则整条丢弃 (模型放不下), 不渲染其余变体
+            base_ids = render_to_tokens(tokenizer, messages,
+                                        apply_variant("base", tools, patterns=patterns))
+            if max_tokens is not None and len(base_ids) > max_tokens:
+                skipped_over_length += 1
+                continue
+            base_token_count = len(base_ids)
             for v in variants:
+                if v == "base":
+                    record["hash_ids_base"] = "|".join(_sha256_chain(base_ids, args.block_size))
+                    continue
                 transformed_tools = apply_variant(v, tools, patterns=patterns)
                 token_ids = render_to_tokens(tokenizer, messages, transformed_tools)
-                hash_ids = _sha256_chain(token_ids, args.block_size)
-                record[f"hash_ids_{v}"] = "|".join(hash_ids)
-                if v == "base":
-                    base_token_count = len(token_ids)
+                record[f"hash_ids_{v}"] = "|".join(_sha256_chain(token_ids, args.block_size))
         except Exception as e:
             skipped_render_error += 1
             if not first_render_error:
@@ -275,7 +302,8 @@ def run_chat_mode(args, tokenizer) -> None:
     print(f"Converted: {len(out_records):,} rows; "
           f"skipped no-json: {skipped_no_json:,}; "
           f"skipped no-messages: {skipped_no_messages:,}; "
-          f"skipped render-error: {skipped_render_error:,}")
+          f"skipped render-error: {skipped_render_error:,}; "
+          f"skipped over-length: {skipped_over_length:,}")
     if first_render_error:
         print(f"  first render error: {first_render_error[:300]}")
 
@@ -314,6 +342,11 @@ def parse_args() -> argparse.Namespace:
                    help="model_id constant written to every output row")
     p.add_argument("--request-type", default="chat",
                    help="request_type constant for every output row")
+    p.add_argument("--max-input-tokens", type=int, default=None,
+                   help="Drop requests whose tokenized length exceeds this "
+                        "(default: auto from tokenizer.model_max_length)")
+    p.add_argument("--no-length-filter", action="store_true",
+                   help="Disable the over-length filter (default on)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print preview of first 5 converted rows and exit")
 

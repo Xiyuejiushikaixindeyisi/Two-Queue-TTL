@@ -42,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.csv_trace import get_col, iter_rows, parse_ts, resolve_app  # noqa: E402
 from lib.hit_rate import lcp  # noqa: E402
-from lib.prompt_encoder import build_encoder_from_args  # noqa: E402
+from lib.prompt_encoder import build_encoder_from_args, resolve_max_input_tokens  # noqa: E402
 
 
 def analyze_dataset(
@@ -52,16 +52,21 @@ def analyze_dataset(
     *,
     app_id: str | None = None,
     app_col: str | None = None,
+    max_input_tokens: int | None = None,
 ) -> dict:
     """单 CSV 的整库 pooled 理想命中率 (可选只看某 app-id).
 
+    max_input_tokens: 超过此 token 数的请求**整条丢弃** (模型放不下), 计入 skipped_over_length,
+    不计入 reqs/blocks。None = 不过滤。
+
     Returns dict: reqs / n_apps / total_blocks / unique_blocks / hit_blocks /
-    ideal_hit_rate / trace_duration_min / avg_gb_per_min (后者 token 模式 + 有 ts 才填).
+    ideal_hit_rate / trace_duration_min / avg_gb_per_min / skipped_over_length.
     """
     seen: set[bytes] = set()
     hit = 0
     total = 0
     reqs = 0
+    skipped_over_length = 0
     apps: set[str] = set()
     earliest: int | None = None
     latest: int | None = None
@@ -70,22 +75,27 @@ def analyze_dataset(
         uid = resolve_app(row, app_col)
         if app_id is not None and uid != app_id:
             continue
+
+        prompt = get_col(row, "raw_prompt") or ""
+        keys: list[bytes] = []
+        if prompt:
+            keys, ntok = encoder.encode_with_length(prompt)
+            if max_input_tokens is not None and ntok > max_input_tokens:
+                skipped_over_length += 1
+                continue  # 整条丢弃: 不计入 reqs/apps/ts/blocks
+
         reqs += 1
         if uid:
             apps.add(uid)
-
         ts = parse_ts(get_col(row, "timestamp"))
         if ts is not None:
             if earliest is None or ts < earliest:
                 earliest = ts
             if latest is None or ts > latest:
                 latest = ts
-
-        prompt = get_col(row, "raw_prompt") or ""
         if not prompt:
             continue
 
-        keys = encoder.encode(prompt)
         hit += lcp(keys, seen)
         total += len(keys)
         seen.update(keys)
@@ -111,6 +121,7 @@ def analyze_dataset(
         "ideal_hit_rate": ideal,
         "trace_duration_min": round(dur_min, 2),
         "avg_gb_per_min": avg_gb_per_min,
+        "skipped_over_length": skipped_over_length,
     }
 
 
@@ -160,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--chat-mode", type=str, default="wrap_user",
                    choices=["raw", "wrap_user", "messages"], help="chat template 包裹方式")
     p.add_argument("--block-size", type=int, default=128)
+    p.add_argument("--max-input-tokens", type=int, default=None,
+                   help="超过此 token 数的请求整条丢弃 (默认自动取 tokenizer.model_max_length)")
+    p.add_argument("--no-length-filter", action="store_true",
+                   help="关闭超长过滤 (默认开: 用 tokenizer 上限)")
     p.add_argument("--csv-out", type=Path, default=None, help="(可选) 把表写到 CSV")
     args = p.parse_args(argv)
 
@@ -171,12 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     encoder, encoder_meta = build_encoder_from_args(args)
     block_size = getattr(encoder, "block_size_tokens",
                          getattr(encoder, "block_size_bytes", args.block_size))
+    max_tokens = resolve_max_input_tokens(encoder, args.max_input_tokens, args.no_length_filter)
 
     mode = f"app-id={args.app_id}" if args.app_id is not None else "整库 pooled"
     print(f"Encoder: {encoder_meta['name']} (block_size={args.block_size} {encoder_meta['block_unit']}, "
           f"chat_mode={encoder_meta['chat_mode']}, "
           f"kv_bytes_per_token={encoder_meta.get('kv_bytes_per_token')})")
-    print(f"Mode: {mode}; datasets: {len(csv_files)}")
+    print(f"Mode: {mode}; datasets: {len(csv_files)}; "
+          f"max_input_tokens={max_tokens if max_tokens is not None else '不过滤'}")
     if encoder_meta["block_unit"] == "bytes":
         print("⚠ 字节级: ideal_hit_rate 相对 vllm 系统性偏高 0-30pp (见 docs/metrics_glossary.md §3)")
     print()
@@ -188,8 +205,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{name}] analyzing... ", end="", flush=True)
         try:
             stats = analyze_dataset(csv_path, encoder, block_size,
-                                    app_id=args.app_id, app_col=args.app_col)
-            print(f"done in {time.time() - t0:.1f}s  ({stats['reqs']:,} reqs)")
+                                    app_id=args.app_id, app_col=args.app_col,
+                                    max_input_tokens=max_tokens)
+            over = stats["skipped_over_length"]
+            over_note = f", 丢弃超长 {over:,}" if over else ""
+            print(f"done in {time.time() - t0:.1f}s  ({stats['reqs']:,} reqs{over_note})")
             rows.append((name, stats))
         except Exception as e:  # noqa: BLE001
             print(f"❌ {e}", file=sys.stderr)
